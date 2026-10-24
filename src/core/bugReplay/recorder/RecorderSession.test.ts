@@ -161,6 +161,25 @@ describe('Recorder session', () => {
     expect(await placeAt({ x: 100, y: 120 }, 300)).toBeUndefined();
   });
 
+  it('keeps request bodies for the newest requests only, so a long recording stays bounded in memory', async () => {
+    const { session, recorder, emit } = harness();
+    await session.attach();
+    session.noteStart('/', []);
+    recorder({ type: 'action', kind: 'click', target: APPLY });
+    // One click that sent 70 writes, each answered without a JSON body.
+    for (let index = 0; index < 70; index += 1) {
+      const requestId = `w${index}`;
+      emit('Network.requestWillBeSent', { requestId, type: 'Fetch', request: { url: `${ORIGIN}/api/lines/${index}`, method: 'POST', postData: JSON.stringify({ line: index }) } });
+      emit('Network.responseReceived', { requestId, response: { status: 204, mimeType: 'text/plain', headers: {} } });
+      emit('Network.loadingFinished', { requestId });
+    }
+    session.seal();
+
+    const kept = session.log().requests.filter((request) => request.requestJson !== undefined).map((request) => request.path);
+    expect(kept).toHaveLength(60);
+    expect(kept[0]).toBe('/api/lines/10');
+  });
+
   it('times a fill from its first keystroke and the start page from its load, so the marked step holds what the page did meanwhile', async () => {
     const { session, recorder } = harness();
     await session.attach();

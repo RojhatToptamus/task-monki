@@ -1,4 +1,4 @@
-import { useRef, useState, type RefObject } from 'react';
+import { useCallback, useRef, useState, type RefObject } from 'react';
 import { MoreHorizontal } from 'lucide-react';
 import type { BugCaseAction, BugCaseView, BugCheckResult, BugReplayGateProjection, BugReplaySnapshot } from '../../../shared/bugReplay';
 import { DEFAULT_BUG_CASE_ENVIRONMENT } from '../../../shared/bugReplay';
@@ -12,9 +12,9 @@ import {
   bugResultsTable,
   bugRunRows,
   describeBugStatus,
-  formatDuration,
   layoutBugActions
 } from '../../model/bugReplay';
+import { formatElapsed } from '../../model/agentSession';
 import { formatAttachmentBytes } from '../../model/taskAttachmentDraft';
 import { formatShortAge } from '../../model/timeAgo';
 import { ActionMenu } from '../ActionMenu';
@@ -47,6 +47,9 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
   const [editing, setEditing] = useState(false);
+  // The dialogs the bug's surfaces open on their own report while they are open: the page is inert behind them.
+  const [openLayers, setOpenLayers] = useState(0);
+  const onLayerOpenChange = useCallback((open: boolean) => setOpenLayers((count) => count + (open ? 1 : -1)), []);
   // A dialog gives focus back to what opened it: the menu's trigger for a menu item (the item is
   // gone once the menu closes), else the button itself.
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
@@ -142,7 +145,7 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
     const reason = reasonFor(action, view);
     return {
       label: bugActionLabel(action, view),
-      pendingLabel: bugActionPendingLabel(action),
+      pendingLabel: bugActionPendingLabel(action, view),
       pending: busy === action,
       disabled: Boolean(busy) || Boolean(reason),
       reason,
@@ -160,7 +163,7 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
       onSelect: () => perform(action, 'menu')
     };
   };
-  return { busy, perform, dialogs, asSlotAction, asMenuItem, menuTriggerRef, modalOpen: confirmRemove || unlocking || editing };
+  return { busy, perform, dialogs, asSlotAction, asMenuItem, menuTriggerRef, onLayerOpenChange, modalOpen: confirmRemove || unlocking || editing || openLayers > 0 };
 }
 
 /**
@@ -181,16 +184,14 @@ export function BugNowPanel({ view, snapshot, actions }: {
   const lease = approval ? snapshot.pendingLease : undefined;
   const reason = bugReason(view.gate);
   const detail = approval ? waitingLine(snapshot) : reason ?? bugReplaysSummary(view.gate).join(', ');
-  const decline = approval && view.actions.includes('cancel-run') ? actions.asSlotAction('cancel-run', view) : undefined;
-  const secondary = layout.secondary.filter((action) => !(decline && action === 'cancel-run'));
   return (
     <DecisionSlot>
       <SlotContent
         headline={status.word}
         detail={detail || undefined}
-        decline={decline}
+        decline={layout.decline ? actions.asSlotAction(layout.decline, view) : undefined}
         primary={layout.primary ? actions.asSlotAction(layout.primary, view) : undefined}
-        secondary={secondary.map((action) => actions.asSlotAction(action, view))}
+        secondary={layout.secondary.map((action) => actions.asSlotAction(action, view))}
       >
         {lease ? (
           <details className="tm-bug__details">
@@ -272,8 +273,6 @@ export function BugSection({
   const nowPanelHoldsBug = nowPanel === 'step';
   const runs = bugRunRows(snapshot.runs, view.version?.id);
   const lease = view.gate.activeRun?.waitingFor === 'APPROVAL' ? snapshot.pendingLease : undefined;
-  // Approving replays puts declining first, as every approval does.
-  const approvalDecline = Boolean(lease) && view.actions.includes('cancel-run');
   const reason = bugReason(view.gate);
   const results = bugResultsTable(view);
   const summary = bugReplaysSummary(view.gate);
@@ -401,7 +400,7 @@ export function BugSection({
                           {row.word}
                         </span>
                       </td>
-                      <td className="tm-table__num tm-table__quiet">{row.durationMs !== undefined ? formatDuration(row.durationMs) : ''}</td>
+                      <td className="tm-table__num tm-table__quiet">{row.durationMs !== undefined ? formatElapsed(row.durationMs) : ''}</td>
                       <td className="tm-table__num tm-table__quiet">
                         <time dateTime={row.at} title={new Date(row.at).toLocaleString()}>{formatShortAge(row.at)}</time>
                       </td>
@@ -438,13 +437,16 @@ export function BugSection({
 
       {!nowPanelHoldsBug && (layout.primary || layout.secondary.length) ? (
         <SlotActions quiet
-          decline={approvalDecline ? actions.asSlotAction('cancel-run', view) : undefined}
+          decline={layout.decline ? actions.asSlotAction(layout.decline, view) : undefined}
           primary={layout.primary ? actions.asSlotAction(layout.primary, view) : undefined}
-          secondary={layout.secondary.filter((action) => !(approvalDecline && action === 'cancel-run')).map((action) => actions.asSlotAction(action, view))} />
+          secondary={layout.secondary.map((action) => actions.asSlotAction(action, view))} />
       ) : null}
-      <Presence>{compare ? <BugCompareDialog taskId={taskId} title={view.title} shots={shots} viewport={viewport} initial={compare} onClose={() => setCompare(undefined)} /> : null}</Presence>
+      <Presence>{compare ? (
+        <BugCompareDialog taskId={taskId} title={view.title} shots={shots} viewport={viewport} initial={compare}
+          onOpenChange={actions.onLayerOpenChange} onClose={() => setCompare(undefined)} />
+      ) : null}</Presence>
       <Presence>{run ? (
-        <BugRunDrawer taskId={taskId} run={run} view={view} viewport={viewport}
+        <BugRunDrawer taskId={taskId} run={run} view={view} viewport={viewport} onOpenChange={actions.onLayerOpenChange}
           onClose={() => {
             const trigger = runRowRefs.current.get(run.id);
             setOpenRun(undefined);
@@ -472,10 +474,12 @@ function ResultCell({ result, quiet }: { result: BugCheckResult | undefined; qui
  * Debug's record of the task's bugs: earlier ones the person replaced or removed, with Delete
  * evidence to free their space. The current bug's evidence stays with it.
  */
-export function BugEvidencePanel({ taskId, snapshot, onError, refresh }: {
+export function BugEvidencePanel({ taskId, snapshot, onError, onModalOpenChange, refresh }: {
   taskId: string;
   snapshot: BugReplaySnapshot;
   onError(message: string): void;
+  /** Told while Delete evidence asks, so the page behind it is inert. */
+  onModalOpenChange?(open: boolean): void;
   refresh(): void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -559,6 +563,7 @@ export function BugEvidencePanel({ taskId, snapshot, onError, refresh }: {
           busy={busy}
           returnFocusRef={listRef}
           shouldReturnFocus={() => !deletedRef.current}
+          onOpenChange={onModalOpenChange}
           onKeep={() => setConfirming(undefined)}
           onConfirm={() => void remove(confirming.id)} />
       ) : null}</Presence>

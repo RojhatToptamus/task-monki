@@ -1,22 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import type { StoredBugReplayRun } from './BugReplayRecords';
+import type { BugCaseRecord, StoredBugReplayRun } from './BugReplayRecords';
 import {
   at,
   attempt,
   bugCaseRecord,
+  checkoutCompiled,
   newestFirst,
   reproducedQualification,
   runRecord,
   TOOLCHAIN,
   versionRecord
 } from '../../testSupport/bugReplay/bugReplayFixtures';
-import { computeGate, openSetNeeds, owedRuns, verdictAttempt, verificationCovered, type BugCaseState } from './BugReplayGate';
+import { computeGate, openSetNeeds, owedRuns, replayTerms, verdictAttempt, verdictEvidence, verificationCovered } from './BugReplayGate';
 
 const version = versionRecord();
 const approved = [{ id: 'decision-1', caseId: version.caseId, taskId: 'task-1', kind: 'APPROVED' as const, versionId: version.id, createdAt: at(0) }];
 
-function gate(runs: StoredBugReplayRun[], state: BugCaseState = {}) {
-  return computeGate({ bugCase: bugCaseRecord(), state, versions: [version], decisions: approved, runs: newestFirst(runs), toolchain: TOOLCHAIN, now: at(60) });
+function gate(runs: StoredBugReplayRun[], observed: Partial<BugCaseRecord> = {}) {
+  return computeGate({ bugCase: bugCaseRecord(observed), versions: [version], decisions: approved, runs: newestFirst(runs), toolchain: TOOLCHAIN, now: at(60) });
 }
 
 describe('Bug gate', () => {
@@ -55,6 +56,17 @@ describe('Bug gate', () => {
     expect(gate(runs, { observedTreeId: 'tree-b' })).toMatchObject({ state: 'STILL_FAILING', verdictTreeId: 'tree-b' });
   });
 
+  it('reads After only once the gate states a verdict, never from a verification still running', () => {
+    const running = [...reproducedQualification(), ...attempt('attempt-1', 'tree-fix', ['PASSED', 'OPEN'], 10)];
+    const verifying = gate(running, { observedTreeId: 'tree-fix' });
+
+    expect(verifying.state).toBe('VERIFYING');
+    expect(verdictEvidence(newestFirst(running), version.id, verifying)).toEqual({ reproduced: expect.objectContaining({ outcome: 'REPRODUCED' }) });
+
+    const done = [...reproducedQualification(), ...attempt('attempt-1', 'tree-fix', ['PASSED', 'PASSED'], 10)];
+    expect(verdictEvidence(newestFirst(done), version.id, gate(done, { observedTreeId: 'tree-fix' })).decisive).toMatchObject({ outcome: 'PASSED', inputTreeId: 'tree-fix' });
+  });
+
   it('asks the person to allow runs even when newer runs wait behind the requalification', () => {
     const runs = [
       ...reproducedQualification(),
@@ -80,7 +92,7 @@ describe('Bug gate', () => {
     ];
     const ofChanged = (runs: StoredBugReplayRun[]) => runs.map((run) => ({ ...run, versionId: changed.id }));
     const gateOf = (runs: StoredBugReplayRun[]) =>
-      computeGate({ bugCase: bugCaseRecord(), state: { observedTreeId: 'tree-fix' }, versions: [version, changed], decisions, runs: newestFirst(runs), toolchain: TOOLCHAIN, now: at(60) });
+      computeGate({ bugCase: bugCaseRecord({ observedTreeId: 'tree-fix' }), versions: [version, changed], decisions, runs: newestFirst(runs), toolchain: TOOLCHAIN, now: at(60) });
     // Version 1 was reproduced and its fix verified on the code the worktree holds.
     const earlier = [...reproducedQualification(), ...attempt('attempt-1', 'tree-fix', ['PASSED', 'PASSED'], 10)];
     const requalifying = ofChanged([
@@ -158,6 +170,28 @@ describe('Verification coverage', () => {
     expect(verificationCovered(runs, version.id, 'tree-other', TOOLCHAIN)).toBe(false);
     // A newer runner or browser decides again.
     expect(verificationCovered(runs, version.id, 'tree-fix', 'toolchain-2')).toBe(false);
+  });
+
+  it('never reuses a verdict reached with other browser storage when the checks reload the page', () => {
+    // Tree A was verified with storage cleared at the reload; then the person kept storage.
+    const reloading = versionRecord({ ...checkoutCompiled(true) });
+    const kept = replayTerms(TOOLCHAIN, true, reloading.document);
+    const runs = [...reproducedQualification(), ...attempt('attempt-a', 'tree-a', ['PASSED', 'PASSED'], 10)];
+
+    expect(verificationCovered(newestFirst(runs), reloading.id, 'tree-a', TOOLCHAIN)).toBe(true);
+    expect(verificationCovered(newestFirst(runs), reloading.id, 'tree-a', kept)).toBe(false);
+    // A later attempt failed on tree B; back on tree A, the old verdict does not stand.
+    const back = computeGate({
+      bugCase: bugCaseRecord({ keepBrowserStorage: true, observedTreeId: 'tree-a' }),
+      versions: [reloading],
+      decisions: approved,
+      runs: newestFirst([...runs, ...attempt('attempt-b', 'tree-b', ['FAILED'], 20)]),
+      toolchain: TOOLCHAIN,
+      now: at(60)
+    });
+    expect(back).toMatchObject({ state: 'STALE', verdictTreeId: 'tree-b' });
+    // Checks that never reload run the same way either way, so their verdicts stand.
+    expect(replayTerms(TOOLCHAIN, true, version.document)).toBe(TOOLCHAIN);
   });
 
   it('owes a new attempt for one a restart cut short, but never loops on one that could not run', () => {

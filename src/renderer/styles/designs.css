@@ -235,8 +235,6 @@
   background: var(--surface);
 }
 
-/* The toolbar under a head is 40px (DESIGN.md 9.1): 28px controls, words from
-   the 16px edge of the stage below. */
 /* A toolbar under the head: exactly --h-bar, its hairline in its last row. */
 .tm-design-canvas__toolbar {
   height: var(--h-bar);
@@ -867,7 +865,7 @@
 }
 
 /* The versions scroll sideways, so an outside halo would be cut. */
-.app-shell[data-input-modality='keyboard'] .tm-design-canvas__versions button:focus {
+:root[data-input-modality='keyboard'] .tm-design-canvas__versions button:focus {
   box-shadow: var(--focus-halo-inset);
 }
 
@@ -1152,13 +1150,6 @@
   width: min(440px, 100%);
 }
 
-.tm-design-rename h3 {
-  margin-bottom: 16px;
-  font-size: var(--t-heading);
-}
-
-/* A field: its label above at --t-label/500, then a 32px input with the
-   field fill and rim. Focus comes from the shared text-entry rule. */
 .tm-modal__panel.tm-design-external {
   width: min(460px, 100%);
 }

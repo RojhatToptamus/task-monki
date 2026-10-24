@@ -26,6 +26,7 @@ function hostilePage(frames: { sameSite: string; crossSite: string }): string {
   window.__trusted = [];
   window.__frameInput = [];
   window.__mutations = 0;
+  window.__forged = 0;
   // Ahead of every other listener: note the person's input, swallow it, and steer what comes next
   // by covering the page with a decoy.
   for (const type of ['pointermove', 'mousemove', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
@@ -63,6 +64,7 @@ function hostilePage(frames: { sameSite: string; crossSite: string }): string {
     document.getElementById('badge').attachShadow({ mode: 'closed' }).innerHTML = '<span style="display:block;height:40px">Shadow badge</span>';
     // Forge: the page clicks and points at its own elements all the time.
     setInterval(() => {
+      window.__forged += 1;
       const total = document.getElementById('total');
       for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
         total.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, clientX: 40, clientY: 90 }));
@@ -278,7 +280,8 @@ describe.skipIf(!existsSync(browser))('Pointing with Chrome’s inspect mode on 
     const { outcome } = await point();
     await conn.page('Input.dispatchMouseEvent', { type: 'mouseMoved', x: total.x, y: total.y });
     // The page has been forging clicks on the total all along; none of them is a pick.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    const forged = await evaluate<number>('window.__forged');
+    await until(async () => (await evaluate<number>('window.__forged')) >= forged + 10, 'the page to forge clicks while pointing');
     expect(await settled(outcome)).toBe(false);
     // Nothing was drawn into the page: the element under the pointer is still the page's own.
     expect(await evaluate(`document.elementFromPoint(${total.x}, ${total.y}).id`)).toBe('total');
@@ -320,13 +323,25 @@ describe.skipIf(!existsSync(browser))('Pointing with Chrome’s inspect mode on 
   }, 30_000);
 
   it('ends pointing with the reason when the person points into an embedded frame, and the frame gets no input', async () => {
-    for (const frame of ['#same-origin', '#same-site', '#cross-site']) {
+    const frames = ['#same-origin', '#same-site', '#cross-site'];
+    for (const frame of frames) {
       const { outcome } = await point();
       await click(await center(frame));
       expect(await outcome, frame).toEqual({ kind: 'stopped', reason: EMBEDDED_FRAME_PICK_REASON });
     }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(await evaluate('window.__frameInput')).toEqual([]);
+    // Returns once inspect mode is off on the page and every frame.
+    await recorder.cancelPick();
+
+    // A click once pointing stopped reaches each frame. Input a pointing click handed a frame
+    // would have reached it first, so the frames heard only these.
+    const heard: string[] = [];
+    for (const frame of frames) {
+      const host = await evaluate<string>(`new URL(document.querySelector(${JSON.stringify(frame)}).src).host`);
+      await click(await center(frame));
+      heard.push(...['pointerdown', 'mousedown', 'mouseup', 'click'].map((type) => `${host} ${type}`));
+      await until(async () => (await evaluate<string[]>('window.__frameInput')).includes(`${host} click`), `${frame} to take the click`);
+    }
+    expect(await evaluate('window.__frameInput')).toEqual(heard);
   }, 30_000);
 
   it('stops on Stop pointing and on Escape, and the page takes clicks again', async () => {

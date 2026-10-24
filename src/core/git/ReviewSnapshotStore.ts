@@ -8,6 +8,9 @@ import { planUntrackedFiles, type ReadOnlySnapshotOmission } from './ReadOnlySna
 import { boundedTreeDiff } from './treeDiff';
 
 const GIT_TIMEOUT_MS = 120_000;
+/** A store is pruned at most this often, and keeps objects younger than the grace, so a tree captured and not pinned yet keeps its content. */
+const PRUNE_INTERVAL_MS = 10 * 60_000;
+const PRUNE_GRACE = '1.hour.ago';
 
 type UnavailableReason = Extract<ReviewChangesResult, { status: 'UNAVAILABLE' }>['reason'];
 
@@ -36,6 +39,7 @@ interface SnapshotRepository {
  */
 export class ReviewSnapshotStore {
   private readonly queues = new Map<string, Promise<unknown>>();
+  private readonly prunedAt = new Map<string, number>();
 
   constructor(private readonly root: string) {}
 
@@ -46,15 +50,13 @@ export class ReviewSnapshotStore {
   }
 
   /** Keeps a captured tree as the code a review read. */
-  async pin(worktreePath: string, taskId: string, reviewRunId: string, tree: string): Promise<void> {
-    const store = await this.storeFor(worktreePath);
-    await this.serialize(store.dir, () => git(store.dir, ['update-ref', reviewRef(taskId, reviewRunId), tree], GIT_TIMEOUT_MS));
+  pin(worktreePath: string, taskId: string, reviewRunId: string, tree: string): Promise<void> {
+    return this.pinTree(worktreePath, reviewRef(taskId, reviewRunId), tree);
   }
 
   /** Lets go of the code kept for a review that never started; its tree goes with the store's next prune. */
-  async unpin(worktreePath: string, taskId: string, reviewRunId: string): Promise<void> {
-    const store = await this.storeFor(worktreePath);
-    await this.serialize(store.dir, () => git(store.dir, ['update-ref', '-d', reviewRef(taskId, reviewRunId)], GIT_TIMEOUT_MS));
+  unpin(worktreePath: string, taskId: string, reviewRunId: string): Promise<void> {
+    return this.releaseRef(worktreePath, reviewRef(taskId, reviewRunId));
   }
 
   /**
@@ -89,7 +91,7 @@ export class ReviewSnapshotStore {
     const store = await this.storeFor(worktreePath);
     return this.serialize(store.dir, async () => {
       const plan = await planUntrackedFiles(worktreePath);
-      const treeId = await this.writeTree(worktreePath, store);
+      const treeId = await this.writeTree(worktreePath, store, plan);
       await git(store.dir, ['update-ref', ref, treeId], GIT_TIMEOUT_MS);
       return { treeId, omitted: plan.omitted };
     });
@@ -107,6 +109,7 @@ export class ReviewSnapshotStore {
     assertOwnedRef(ref);
     const store = await this.storeFor(worktreePath);
     await this.serialize(store.dir, () => git(store.dir, ['update-ref', '-d', ref], GIT_TIMEOUT_MS).catch(() => undefined));
+    if (Date.now() - (this.prunedAt.get(store.dir) ?? 0) >= PRUNE_INTERVAL_MS) await this.prune(store);
   }
 
   /** True when the store can still read every object of the tree. */
@@ -129,15 +132,8 @@ export class ReviewSnapshotStore {
 
   /** Blob ids and modes of the given paths in a tree; absent paths are left out. */
   async entriesAt(worktreePath: string, treeId: string, paths: string[]): Promise<Map<string, { mode: string; blob: string }>> {
-    const entries = new Map<string, { mode: string; blob: string }>();
-    if (paths.length === 0) return entries;
-    const store = await this.storeFor(worktreePath);
-    const output = await git(worktreePath, ['ls-tree', '-z', '--full-tree', treeId, '--', ...paths], { timeout: GIT_TIMEOUT_MS, env: store.env });
-    for (const record of output.split('\0').filter(Boolean)) {
-      const match = /^(\d{6}) (\w+) ([0-9a-f]+)\t(.+)$/s.exec(record);
-      if (match && match[2] === 'blob') entries.set(match[4], { mode: match[1], blob: match[3] });
-    }
-    return entries;
+    if (paths.length === 0) return new Map();
+    return this.entries(worktreePath, await this.storeFor(worktreePath), treeId, paths);
   }
 
   /** Every path in a tree, for rules that look for files by name. */
@@ -149,44 +145,12 @@ export class ReviewSnapshotStore {
 
   /** The text of one file in a tree, bounded; undefined when it is absent or larger than the bound. */
   async readText(worktreePath: string, treeId: string, filePath: string, maxBytes = 512 * 1024): Promise<string | undefined> {
-    const entries = await this.entriesAt(worktreePath, treeId, [filePath]);
-    const entry = entries.get(filePath);
-    if (!entry) return undefined;
     const store = await this.storeFor(worktreePath);
+    const entry = (await this.entries(worktreePath, store, treeId, [filePath])).get(filePath);
+    if (!entry) return undefined;
     const size = Number((await git(worktreePath, ['cat-file', '-s', entry.blob], { timeout: GIT_TIMEOUT_MS, env: store.env })).trim());
     if (!Number.isFinite(size) || size > maxBytes) return undefined;
     return git(worktreePath, ['cat-file', 'blob', entry.blob], { timeout: GIT_TIMEOUT_MS, env: store.env });
-  }
-
-  /**
-   * A new tree: `baseTree` with the given paths replaced by their entries in `fromTree` (or
-   * removed where `fromTree` lacks them), pinned under `ref`.
-   */
-  async composeTree(worktreePath: string, baseTree: string, fromTree: string, paths: string[], ref: string): Promise<string> {
-    assertOwnedRef(ref);
-    const store = await this.storeFor(worktreePath);
-    return this.serialize(store.dir, async () => {
-      const index = path.join(store.dir, `index-${randomUUID()}`);
-      const env = { ...store.env, GIT_INDEX_FILE: index };
-      try {
-        await git(worktreePath, ['read-tree', baseTree], { timeout: GIT_TIMEOUT_MS, env });
-        const replacements = await this.entriesAtUnlocked(worktreePath, fromTree, paths, store.env);
-        const lines: string[] = [];
-        for (const file of paths) {
-          const entry = replacements.get(file);
-          lines.push(entry ? `${entry.mode} ${entry.blob}\t${file}` : `0 ${'0'.repeat(40)}\t${file}`);
-        }
-        if (lines.length) {
-          await git(worktreePath, ['update-index', '-z', '--index-info'], { timeout: GIT_TIMEOUT_MS, env, stdin: lines.join('\0') + '\0' });
-        }
-        const tree = (await git(worktreePath, ['write-tree'], { timeout: GIT_TIMEOUT_MS, env })).trim();
-        await git(store.dir, ['update-ref', ref, tree], GIT_TIMEOUT_MS);
-        return tree;
-      } finally {
-        await fs.rm(index, { force: true });
-        await fs.rm(`${index}.lock`, { force: true });
-      }
-    });
   }
 
   /**
@@ -214,10 +178,9 @@ export class ReviewSnapshotStore {
     return lines;
   }
 
-  private async entriesAtUnlocked(worktreePath: string, treeId: string, paths: string[], env: NodeJS.ProcessEnv): Promise<Map<string, { mode: string; blob: string }>> {
+  private async entries(worktreePath: string, store: SnapshotRepository, treeId: string, paths: string[]): Promise<Map<string, { mode: string; blob: string }>> {
     const entries = new Map<string, { mode: string; blob: string }>();
-    if (paths.length === 0) return entries;
-    const output = await git(worktreePath, ['ls-tree', '-z', '--full-tree', treeId, '--', ...paths], { timeout: GIT_TIMEOUT_MS, env });
+    const output = await git(worktreePath, ['ls-tree', '-z', '--full-tree', treeId, '--', ...paths], { timeout: GIT_TIMEOUT_MS, env: store.env });
     for (const record of output.split('\0').filter(Boolean)) {
       const match = /^(\d{6}) (\w+) ([0-9a-f]+)\t(.+)$/s.exec(record);
       if (match && match[2] === 'blob') entries.set(match[4], { mode: match[1], blob: match[3] });
@@ -265,8 +228,14 @@ export class ReviewSnapshotStore {
       const refs = (await git(store.dir, ['for-each-ref', '--format=%(refname)', `refs/tasks/${taskId}/`], GIT_TIMEOUT_MS))
         .split('\n').filter(Boolean);
       if (refs.length) await git(store.dir, ['update-ref', '--stdin'], { timeout: GIT_TIMEOUT_MS, stdin: refs.map((ref) => `delete ${ref}\n`).join('') });
-      await git(store.dir, ['prune', '--expire=now'], GIT_TIMEOUT_MS).catch(() => undefined);
     });
+    await this.prune(store);
+  }
+
+  /** Collects the objects no ref keeps any more, except those younger than the grace. */
+  private async prune(store: SnapshotRepository): Promise<void> {
+    this.prunedAt.set(store.dir, Date.now());
+    await this.serialize(store.dir, () => git(store.dir, ['prune', `--expire=${PRUNE_GRACE}`], GIT_TIMEOUT_MS).catch(() => undefined));
   }
 
   private async storeFor(worktreePath: string): Promise<SnapshotRepository> {
@@ -278,8 +247,14 @@ export class ReviewSnapshotStore {
       await git(this.root, ['init', '--bare', '--quiet', dir], GIT_TIMEOUT_MS);
       await git(dir, ['config', 'gc.auto', '0'], GIT_TIMEOUT_MS);
     }
-    // Reads through to the source repository's objects; rewritten in case the repository moved.
-    await fs.writeFile(path.join(dir, 'objects', 'info', 'alternates'), `${objects}\n`);
+    // Reads through to the source repository's objects; rewritten when the repository moved, and
+    // replaced whole, so a Git process reading it never sees it empty.
+    const alternates = path.join(dir, 'objects', 'info', 'alternates');
+    if ((await fs.readFile(alternates, 'utf8').catch(() => '')) !== `${objects}\n`) {
+      const next = `${alternates}.${randomUUID()}`;
+      await fs.writeFile(next, `${objects}\n`);
+      await fs.rename(next, alternates);
+    }
     return { dir, env: { GIT_OBJECT_DIRECTORY: path.join(dir, 'objects'), GIT_ALTERNATE_OBJECT_DIRECTORIES: objects } };
   }
 
@@ -298,7 +273,7 @@ export class ReviewSnapshotStore {
   }
 
   /** The worktree's content as a tree, staged in a private copy of its index so the worktree is untouched. */
-  private async writeTree(worktreePath: string, store: SnapshotRepository): Promise<string> {
+  private async writeTree(worktreePath: string, store: SnapshotRepository, plan?: Awaited<ReturnType<typeof planUntrackedFiles>>): Promise<string> {
     const index = path.join(store.dir, `index-${randomUUID()}`);
     // A private index is no one's change, so no hook runs for it: hooks can live in the
     // worktree itself (a relative `core.hooksPath`), and there they may be a pull request's.
@@ -306,10 +281,16 @@ export class ReviewSnapshotStore {
     try {
       // The worktree's own index carries the staged changes and the stat cache, so only edited files are hashed.
       const ownIndex = path.resolve(worktreePath, (await git(worktreePath, ['rev-parse', '--git-path', 'index'])).trim());
-      if (await exists(ownIndex)) await fs.copyFile(ownIndex, index);
-      else await git(worktreePath, ['read-tree', 'HEAD'], { timeout: GIT_TIMEOUT_MS, env });
+      const indexTimes = await fs.stat(ownIndex).catch(() => undefined);
+      if (indexTimes) {
+        await fs.copyFile(ownIndex, index);
+        // Git trusts a file's cached stat unless the file changed within the second the index was
+        // written. The copy keeps the index's own time, read before copying, so an edit made in
+        // that second is still read from disk rather than missed.
+        await fs.utimes(index, indexTimes.atime, indexTimes.mtime);
+      } else await git(worktreePath, ['read-tree', 'HEAD'], { timeout: GIT_TIMEOUT_MS, env });
       await git(worktreePath, ['add', '--update', '--', '.'], { timeout: GIT_TIMEOUT_MS, env });
-      const untracked = (await planUntrackedFiles(worktreePath)).files.map((file) => file.relative);
+      const untracked = (plan ?? (await planUntrackedFiles(worktreePath))).files.map((file) => file.relative);
       if (untracked.length) {
         await git(worktreePath, ['add', '--pathspec-from-file=-', '--pathspec-file-nul'], { timeout: GIT_TIMEOUT_MS, env, stdin: untracked.join('\0') });
       }

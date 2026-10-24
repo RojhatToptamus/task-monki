@@ -127,7 +127,7 @@ export function BoardEditorModal({
   };
 
   return (
-    <ModalFrame labelledBy="board-editor-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
+    <ModalFrame labelledBy="board-editor-title" pending={busy} onDismiss={onCancel}>
       <form
         ref={panelRef}
         className="tm-modal__panel tm-board-editor"
@@ -323,7 +323,7 @@ export function DesignExternalLinkModal({
   };
 
   return (
-    <ModalFrame labelledBy="design-external-link-title" describedBy="design-external-link-detail" pending={busy} onDismiss={busy ? undefined : onCancel}>
+    <ModalFrame labelledBy="design-external-link-title" describedBy="design-external-link-detail" pending={busy} onDismiss={onCancel}>
       <div
         ref={panelRef}
         className="tm-modal__panel tm-design-external"
@@ -411,7 +411,7 @@ export function PrepareWorktreeModal({
   };
 
   return (
-    <ModalFrame labelledBy="prepare-worktree-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
+    <ModalFrame labelledBy="prepare-worktree-title" pending={busy} onDismiss={onCancel}>
       <form
         ref={panelRef}
         className="tm-modal__panel tm-prepare-worktree"
@@ -518,7 +518,7 @@ export function RecoverWorktreeModal({
   });
 
   return (
-    <ModalFrame labelledBy="recover-worktree-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
+    <ModalFrame labelledBy="recover-worktree-title" pending={busy} onDismiss={onCancel}>
       <form
         ref={panelRef}
         className="tm-modal__panel tm-prepare-worktree"
@@ -611,7 +611,7 @@ export function RepositoryDisconnectModal({
     }
   };
   return (
-    <ModalFrame labelledBy="disconnect-repository-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
+    <ModalFrame labelledBy="disconnect-repository-title" pending={busy} onDismiss={onCancel}>
       <div
         ref={panelRef}
         className="tm-modal__panel tm-delete-modal"
@@ -710,7 +710,7 @@ export function DeleteTaskModal({
   };
 
   return (
-    <ModalFrame labelledBy="delete-task-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
+    <ModalFrame labelledBy="delete-task-title" pending={busy} onDismiss={onCancel}>
       <div ref={panelRef} className="tm-modal__panel tm-delete-modal" tabIndex={-1}>
         <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
         <p>

@@ -150,7 +150,7 @@ function SubagentNode({
         </summary>
         <div className="subagent-node__body">
           {node.session.relationshipDetail ? (
-            <p className="subagent-node__problem">{node.session.relationshipDetail}</p>
+            <p className="tm-notice" data-tone="waiting">{node.session.relationshipDetail}</p>
           ) : null}
           <dl className="provider-item-kv">
             <dt>Delegated prompt</dt>

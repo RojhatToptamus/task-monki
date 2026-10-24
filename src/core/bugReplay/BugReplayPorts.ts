@@ -9,8 +9,8 @@ import type {
   BugReplayRunFailure,
   BugReplayRunOutcome
 } from '../../shared/bugReplay';
-import type { StoredBugReplayRun } from './BugReplayRecords';
-import type { ReplayTreeReader } from './ReplayDerivation';
+import type { BugCaseVersionRecord, StoredBugReplayRun } from './BugReplayRecords';
+import type { ProtectedTree } from './ProtectedInputs';
 import type { ReplayAuthorization } from './ReplayAuthorization';
 import type { ReplayEnvironment } from './ReplayEnvironment';
 import type { ReplaySourceFreezer } from './ReplaySourceFreezer';
@@ -53,7 +53,9 @@ export interface BugReplayCore {
   readonly freezer: ReplaySourceFreezer;
   toolchain(): string;
   available(): { replay: boolean; record: boolean; reason?: string };
-  treeReader(worktreePath: string, treeId: string): Promise<ReplayTreeReader>;
+  treeReader(worktreePath: string, treeId: string): Promise<ProtectedTree>;
+  /** Shared setup files whose content differs between the recorded code and `treeId`. */
+  changedSharedSetup(taskId: string, version: BugCaseVersionRecord, treeId: string): Promise<string[]>;
   emitUpdate(taskId: string, projectionChanged?: boolean): void;
   settleRun(run: StoredBugReplayRun, outcome: BugReplayRunOutcome, failure?: BugReplayRunFailure): Promise<void>;
   commit(
@@ -88,6 +90,5 @@ export interface BugRecordingSessions {
   /** Another task's recording is open, so this one cannot start. */
   busyElsewhere(taskId: string): boolean;
   leaseGranted(taskId: string, approvalDigest: string): Promise<void>;
-  forgetTask(taskId: string): void;
   cancelForTask(taskId: string): Promise<void>;
 }

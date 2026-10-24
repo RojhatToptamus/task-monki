@@ -390,10 +390,12 @@ each keeps what the recording showed for its checks in its payload, bounded
 to 16 distinct answers or values per check. Like the case document, it can
 hold a typed password, which every surface masks. Migration 16 adds
 `bug_replay_approvals`, one row per repository and approval digest, which goes
-with its repository and is deleted when revoked. Evidence (screenshots,
-action, network and console logs, run frames, service logs) is stored as managed
-files under `replay/<task>/<owner>/`, each kind with its own size limit, and 256
-MB in all. Evidence is written without request or response bodies, and with
+with its repository and is deleted when revoked, and indexes the child columns
+deleting a task's bug looks up. Evidence (screenshots, action, network and
+console logs, run frames) is stored as managed
+files under `replay/<task>/<owner>/`, each kind with its own size limit; once
+256 MB is stored in all, no new recording starts until earlier evidence is
+deleted. Evidence is written without request or response bodies, and with
 typed passwords and secret-like text masked in every string. Settled runs beyond
 the newest eight keep their records but lose their files, except the
 qualification and the attempts the verdict uses; records beyond the newest
@@ -435,17 +437,25 @@ bug becomes a record with no actions.
   `BugReplayGate.test.ts`, `BugReplayContext.test.ts`, `BugReplayInput.test.ts`,
   `ProtectedInputs.test.ts`, `src/shared/bugCase.test.ts`,
   `src/shared/bugReplayClaims.test.ts`, `src/renderer/model/bugReplay.test.ts`.
-- What an approval covers: `ReplayDerivation.test.ts`.
-- Store and deletion, and kept approvals across restarts, their bound and
-  revocation: `SqliteBugReplayStore.test.ts`; the upgrade to kept approvals:
-  `DatabaseMigrations.test.ts`.
+- What an approval covers, and every recipe a clean copy refuses:
+  `ReplayDerivation.test.ts`; which starts Previewhost may run under a lease:
+  `ReplayAuthorization.test.ts`; which env files a recording offers:
+  `BugRecordingService.test.ts`; a report the runner must not count:
+  `BugReplayRunner.test.ts`.
+- Store and deletion, payloads checked against their rows, and kept approvals
+  across restarts, their bound and revocation: `SqliteBugReplayStore.test.ts`;
+  the upgrade from every earlier numbering: `DatabaseMigrations.test.ts`; the
+  gate's events in the projection: `reducer.test.ts`; a capture of an edit made
+  in the second the index was written: `ReviewSnapshotStore.integration.test.ts`.
 - The queue over real storage and Git with a stand-in Previewhost and a
   scripted runner (admission, approval, shutdown, cancel, replacements,
   unreadable worktrees, pruning, saving a recording, changing expectations,
   approvals kept across a restart, a changed recipe, another repository and
-  revocation):
+  revocation, a newer attempt or a cancel settling a set in one step, a stale
+  verdict, recovery after a crash, and a recording that stops while marked):
   `BugReplayService.integration.test.ts`.
-- Hand-off through the service: `TaskManagerService.bugReplay.integration.test.ts`.
+- Hand-off through the service, and Mark done refusing a verdict about other
+  code: `TaskManagerService.bugReplay.integration.test.ts`.
 - The engine with a real browser, including WebSockets to undeclared hosts:
   `BugReplayRunner.integration.test.ts` (skipped without
   `.local/design-browser-runtime`).
@@ -453,8 +463,10 @@ bug becomes a record with no actions.
   input, with picks in a shadow tree and in same-origin, same-site and
   cross-site frames, the pick's highlight until its outline, Stop pointing and
   Escape: `recorder/RecorderSession.integration.test.ts` (skipped without
-  `.local/design-browser-runtime`); placing a pick on the screenshot and the
-  live steps: `recorder/RecorderSession.test.ts`.
+  `.local/design-browser-runtime`); placing a pick on the screenshot, the live
+  steps and bounded bodies: `recorder/RecorderSession.test.ts`; what the
+  recording view lets through, and Escape while pointing:
+  `src/electron/BugRecordingViewHost.test.ts`.
 - Mounted UI: `TaskDetail.dom.test.tsx` (Remove bug),
   `bug/BugRecordingWorkspace.dom.test.tsx` (including the approval's order),
   `bug/BugCapturePanel.dom.test.tsx` (expectations, focus and naming),

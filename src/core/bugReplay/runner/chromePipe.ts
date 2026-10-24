@@ -50,8 +50,6 @@ export const PLAYWRIGHT_163_CHROMIUM_SWITCHES: readonly string[] = [
 export interface ChromeOverPipe {
   process: ChildProcess;
   transport: ConnectOverCDPTransport;
-  /** Recent stderr lines, for diagnostics only. */
-  stderrTail(): string;
 }
 
 export function startChromeOverPipe(options: {
@@ -75,14 +73,10 @@ export function startChromeOverPipe(options: {
     {
       // Chrome stays in this process's group, so the owned launcher's group kill reaches it.
       detached: false,
-      stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'],
       env: options.env
     }
   );
-  let stderr = '';
-  child.stderr?.on('data', (chunk: Buffer) => {
-    stderr = (stderr + chunk.toString('utf8')).slice(-8192);
-  });
   const writer = child.stdio[3] as NodeJS.WritableStream;
   const reader = child.stdio[4] as NodeJS.ReadableStream;
   let pending: Buffer = Buffer.alloc(0);
@@ -124,7 +118,7 @@ export function startChromeOverPipe(options: {
   reader.on('close', onClose);
   reader.on('error', onClose);
   child.on('exit', onClose);
-  return { process: child, transport, stderrTail: () => stderr };
+  return { process: child, transport };
 }
 
 /** Only these variables reach Chrome; everything else, including ELECTRON_RUN_AS_NODE, is dropped. */

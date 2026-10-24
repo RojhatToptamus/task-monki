@@ -1,4 +1,5 @@
 import {
+  describeTarget,
   isAbsenceAssertion,
   isDomAssertion,
   normalizeVisibleText,
@@ -6,7 +7,6 @@ import {
   type BugCaseAssertion,
   type BugCaseCaptured,
   type BugCaseSignatureEntry,
-  testIdWords,
   type BugCaseTargetCandidate,
   type BugCaseV1
 } from '../../shared/bugCase';
@@ -74,7 +74,7 @@ export function evaluateRun(
   const signatureObserved: Record<string, string> = {};
   for (const assertion of document.assertions) {
     if (!signature.has(assertion.id)) continue;
-    const observed = describeObserved(assertion, indexed.main.get(assertion.id), document, indexed);
+    const observed = describeObserved(assertion, indexed.main.get(assertion.id), document);
     if (observed !== undefined) signatureObserved[assertion.id] = observed;
   }
 
@@ -90,7 +90,7 @@ export function evaluateRun(
     const drift = locatorDrift(document, indexed, environment.baselineLocators);
     if (drift) return { outcome: 'BLOCKED', failure: drift, observations, facts, signatureObserved };
     for (const assertion of document.assertions) {
-      const verdict = holds(assertion, indexed.main.get(assertion.id), document, indexed);
+      const verdict = holds(assertion, indexed.main.get(assertion.id), document);
       if (!verdict.holds) {
         return {
           outcome: 'FAILED',
@@ -129,15 +129,15 @@ export function evaluateRun(
     const entry = signature.get(assertion.id);
     const observation = indexed.main.get(assertion.id);
     if (entry) {
-      if (!showsSignature(entry, assertion, observation, document, indexed)) {
-        const held = holds(assertion, observation, document, indexed).holds;
+      if (!showsSignature(entry, assertion, observation, document)) {
+        const held = holds(assertion, observation, document).holds;
         return {
           outcome: 'NOT_REPRODUCED',
           failure: {
             reason: held ? 'NOT_REPRODUCED' : 'SIGNATURE_MISMATCH',
             detail: held
-              ? `The clean copy showed the expected result: ${describeObserved(assertion, observation, document, indexed) ?? 'it passed'}`
-              : `Not reproduced: ${describeObserved(assertion, observation, document, indexed) ?? 'it failed differently'}${
+              ? `The clean copy showed the expected result: ${describeObserved(assertion, observation, document) ?? 'it passed'}`
+              : `Not reproduced: ${describeObserved(assertion, observation, document) ?? 'it failed differently'}${
                   entry.captured ? `, recorded ${capturedText(entry.captured)}` : ''
                 }`,
             assertionId: assertion.id
@@ -149,7 +149,7 @@ export function evaluateRun(
       }
       continue;
     }
-    const verdict = holds(assertion, observation, document, indexed);
+    const verdict = holds(assertion, observation, document);
     if (!verdict.holds) {
       return {
         outcome: 'NOT_REPRODUCED',
@@ -200,10 +200,9 @@ export function evaluateRun(
 export function holds(
   assertion: BugCaseAssertion,
   observation: BugReplayObservation | undefined,
-  document: BugCaseV1,
-  indexed: Pick<IndexedFrames, 'main'>
+  document: BugCaseV1
 ): { holds: boolean; detail: string } {
-  const observed = describeObserved(assertion, observation, document, indexed);
+  const observed = describeObserved(assertion, observation, document);
   switch (assertion.kind) {
     case 'dom.text':
     case 'dom.value':
@@ -267,10 +266,9 @@ function showsSignature(
   entry: BugCaseSignatureEntry,
   assertion: BugCaseAssertion,
   observation: BugReplayObservation | undefined,
-  document: BugCaseV1,
-  indexed: IndexedFrames
+  document: BugCaseV1
 ): boolean {
-  const failsExpectation = !holds(assertion, observation, document, indexed).holds;
+  const failsExpectation = !holds(assertion, observation, document).holds;
   if (entry.mode === 'ANY_MISMATCH' || !entry.captured) return failsExpectation;
   const captured = entry.captured;
   const dom = asDom(observation);
@@ -458,11 +456,11 @@ function observationView(assertion: BugCaseAssertion, indexed: IndexedFrames, do
   const observation = indexed.main.get(assertion.id);
   const view: BugReplayAssertionObservation = {
     assertionId: assertion.id,
-    passed: holds(assertion, observation, document, indexed).holds
+    passed: holds(assertion, observation, document).holds
   };
   const dom = asDom(observation);
   if (dom?.found && dom.candidateIndex !== undefined) view.locator = dom.candidateIndex;
-  const observed = describeObserved(assertion, observation, document, indexed);
+  const observed = describeObserved(assertion, observation, document);
   if (observed !== undefined) view.observed = observed;
   const value = observedValue(assertion, observation);
   if (value !== undefined) view.value = value;
@@ -533,10 +531,8 @@ function clipValue(text: string): string {
 export function describeObserved(
   assertion: BugCaseAssertion,
   observation: BugReplayObservation | undefined,
-  document: BugCaseV1,
-  indexed: Pick<IndexedFrames, 'main'>
+  document: BugCaseV1
 ): string | undefined {
-  void indexed;
   const subject = targetWord(assertion);
   switch (assertion.kind) {
     case 'dom.text': {
@@ -597,17 +593,11 @@ function sentenceStart(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
+/** The element a check reads, named by the one rule statements use, for the middle of a sentence. */
 function targetWord(assertion: BugCaseAssertion): string {
   if (!isDomAssertion(assertion)) return 'the request';
-  if (assertion.target.label) return assertion.target.label.slice(0, 48);
-  for (const candidate of assertion.target.candidates) {
-    if (candidate.kind === 'label' || candidate.kind === 'placeholder') return candidate.value.slice(0, 48);
-    if (candidate.kind === 'role' && candidate.name) return candidate.name.slice(0, 48);
-  }
-  for (const candidate of assertion.target.candidates) {
-    if (candidate.kind === 'testId') return testIdWords(candidate.value).slice(0, 48);
-  }
-  return 'the element';
+  const name = describeTarget(assertion.target);
+  return name === 'The element' ? 'the element' : name;
 }
 
 function domValue(observation: BugReplayDomObservation | undefined): string | undefined {

@@ -2,9 +2,10 @@ import { useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import type { BugCaseView, BugReplayRunView, BugShotView } from '../../../shared/bugReplay';
-import { bugRunRows, formatDuration, runStepList } from '../../model/bugReplay';
+import { formatElapsed } from '../../model/agentSession';
+import { bugRunRows, runStepList } from '../../model/bugReplay';
 import { useDialogFocusBoundary } from '../dialogFocus';
-import { useLayerProps } from '../presence';
+import { useLayerProps, useOpenReport } from '../presence';
 import { PlanList } from '../Plan';
 import { StatusGlyph, statusGlyphFor } from '../StatusBadge';
 import { formatTaskActivityTimestamp } from '../TaskActivityPanel';
@@ -21,12 +22,15 @@ export function BugRunDrawer({
   run,
   view,
   viewport,
+  onOpenChange,
   onClose
 }: {
   taskId: string;
   run: BugReplayRunView;
   view: BugCaseView;
   viewport: { width: number; height: number };
+  /** Told while the drawer is open, so the page behind it is inert. */
+  onOpenChange?(open: boolean): void;
   onClose(): void;
 }) {
   const panelRef = useRef<HTMLElement>(null);
@@ -35,6 +39,7 @@ export function BugRunDrawer({
   // The replay is read, not filled in: focus starts on what scrolls, so the keys read it and one
   // Escape closes it (the close button's tooltip never opens first).
   useDialogFocusBoundary({ dialogRef: panelRef, initialFocusRef: bodyRef, busy: false, onClose });
+  useOpenReport(onOpenChange);
   const layer = useLayerProps();
   const row = bugRunRows([run], view.version?.id)[0];
   const glyph = row ? statusGlyphFor(row.tone, row.inFlight) : undefined;
@@ -72,7 +77,7 @@ export function BugRunDrawer({
         <div ref={bodyRef} className="tm-bugdrawer__body" tabIndex={0}>
           <p className="tm-bugdrawer__meta">
             <time dateTime={row.at}>{formatTaskActivityTimestamp(row.at).label}</time>
-            {row.durationMs !== undefined ? <span>{formatDuration(row.durationMs)}</span> : null}
+            {row.durationMs !== undefined ? <span>{formatElapsed(row.durationMs)}</span> : null}
             {run.treeId ? <code title={run.treeId}>{run.treeId.slice(0, 8)}</code> : null}
           </p>
           {/* A failure or a step owed is a notice in its tone; anything else is the run's own line. */}

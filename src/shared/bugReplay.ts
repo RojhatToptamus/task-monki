@@ -75,6 +75,8 @@ export interface BugReplayRunFailure {
   detail: string;
   stepIndex?: number;
   assertionId?: string;
+  /** The files a changed-setup or changed-env-file outcome names, as data rather than words. */
+  paths?: string[];
 }
 
 /** What one counted run observed for one check. */
@@ -172,7 +174,6 @@ export interface BugReplayGateProjection {
   activeRun?: { runId: string; kind: BugReplayRunKind; waitingFor?: BugReplayWaitReason };
   handoff?: { handoffId: string; runId?: string; status: BugReplayHandoffStatus; since: string };
   lastSentAt?: string;
-  pendingProposal?: boolean;
   updatedAt: string;
 }
 
@@ -226,6 +227,8 @@ export interface BugCaptureRequestRow {
   observed: string;
   count: number;
   succeeded: boolean;
+  /** A write: Sent once applies to it. */
+  write: boolean;
   defaultCheck: 'success' | 'answered' | 'none';
   defaultSentOnce: boolean;
 }
@@ -702,7 +705,7 @@ export interface BugReplayApi {
   markBug(input: BugRecordingRequest): Promise<BugReplaySnapshot>;
   pickBugCheck(input: BugRecordingRequest & { draft?: BugCaptureDraft }): Promise<BugReplaySnapshot>;
   stopBugPick(input: BugRecordingRequest): Promise<BugReplaySnapshot>;
-  returnToBugRecording(input: BugRecordingRequest & { draft?: BugCaptureDraft }): Promise<BugReplaySnapshot>;
+  returnToBugRecording(input: BugRecordingRequest): Promise<BugReplaySnapshot>;
   previewBugCapture(input: BugRecordingRequest & { draft: BugCaptureDraft }): Promise<BugCapturePreview>;
   saveBugCapture(input: BugRecordingRequest & {
     draftRevision: number;

@@ -6,7 +6,6 @@ import type {
   BugRecordingSessionView,
   BugReplayAssertionObservation,
   BugReplayGateProjection,
-  BugReplayLeaseRequest,
   BugReplayRunView,
   BugReplaySnapshot,
   BugShotView
@@ -17,7 +16,7 @@ import { BUG_BOUNDARY_LINE, bugCountsLine, bugScopeLine } from '../../shared/bug
 import { checkViews } from './BugCaseCompiler';
 import { expectationViews } from './BugCaseRevision';
 import { capturedValue } from './BugReplayVerdict';
-import { effectiveVersion, latestSets, verdictAttempt } from './BugReplayGate';
+import { effectiveVersion, latestSets, verdictAttempt, verdictEvidence } from './BugReplayGate';
 import type { BugReplayCore } from './BugReplayPorts';
 import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, StoredBugReplayRun } from './BugReplayRecords';
 import { staticEligibility, ReplayEligibilityError } from './ReplayDerivation';
@@ -58,7 +57,7 @@ export async function buildBugReplaySnapshot(
       }));
     return { active, versions, decisions, runs, capture, captureFiles, runFiles, gate, earlier, used: store.usedBytes(reader) };
   });
-  const availability = await recordAvailability(service, taskId, recording, recordingElsewhere);
+  const availability = await recordAvailability(service, taskId, recording, recordingElsewhere, data.used);
   const snapshot: BugReplaySnapshot = {
     taskId,
     availability,
@@ -114,7 +113,8 @@ async function recordAvailability(
   service: BugReplayCore,
   taskId: string,
   recording: BugRecordingSessionView | undefined,
-  recordingElsewhere: boolean
+  recordingElsewhere: boolean,
+  used: number
 ): Promise<BugReplaySnapshot['availability']> {
   const available = service.available();
   if (!available.record) return { canRecord: false, hiddenReason: available.reason ?? 'Recording needs the desktop app on macOS.' };
@@ -136,7 +136,6 @@ async function recordAvailability(
     return { canRecord: true, recordDisabledReason: error instanceof ReplayEligibilityError ? error.message : 'The preview recipe is not valid.' };
   }
   if (await service.access.agentRunActive(taskId)) return { canRecord: true, recordDisabledReason: "The agent is changing this task's files" };
-  const used = await service.store.read((reader) => service.store.usedBytes(reader));
   if (used >= BUG_REPLAY_STORAGE_LIMIT_BYTES) return { canRecord: true, recordDisabledReason: 'Bug evidence storage is full. Delete evidence of earlier bugs.' };
   return { canRecord: true };
 }
@@ -189,9 +188,10 @@ async function caseView(
     view.boundaryLine = BUG_BOUNDARY_LINE;
     const counts = bugCountsLine(gate);
     if (counts) view.countsLine = counts;
-    const sets = latestSets(runs, version.id);
     const signature = new Set(version.document.failureSignature.map((entry) => entry.assertionId));
-    const reproduced = (sets.qualification ?? []).find((run) => run.outcome === 'REPRODUCED') ?? (sets.qualification ?? []).find((run) => run.counted);
+    const evidence = verdictEvidence(runs, version.id, gate);
+    // A bug that did not reproduce shows what the clean copy showed on the recorded code instead.
+    const reproduced = evidence.reproduced ?? (latestSets(runs, version.id).qualification ?? []).find((run) => run.counted);
     if (reproduced) {
       view.before = reproduced.observations
         .filter((observation) => signature.has(observation.assertionId) && observation.observed)
@@ -199,10 +199,10 @@ async function caseView(
         .map((observation) => `Before: ${observation.observed}`);
     }
     const attempt = verdictAttempt(runs, version.id, gate)?.candidates ?? [];
-    const decisive = [...attempt].reverse().find((run) => run.outcome === 'FAILED') ?? [...attempt].reverse().find((run) => run.outcome === 'PASSED');
+    const decisive = evidence.decisive;
     if (decisive) {
       if (decisive.outcome === 'FAILED' && decisive.failure) {
-        view.after = [decisive.failure.detail.replace(/^After: /, 'After: ')];
+        view.after = [decisive.failure.detail];
       } else {
         view.after = decisive.observations
           .filter((observation) => signature.has(observation.assertionId) && observation.observed)
@@ -220,14 +220,12 @@ async function caseView(
     else if (recordedShot) view.shots.before = { fileId: recordedShot.id, at: capture.createdAt, boxes: recordedBoxes(version.document, capture.markedBoxes ?? []) };
     const afterShot = decisive ? runShot(decisive, runFiles.get(decisive.id)) : undefined;
     if (afterShot) view.shots.after = afterShot;
-    const protectedRun = attempt.find((run) => run.outcome === 'PROTECTED_INPUT_CHANGED');
-    if (protectedRun?.failure) {
-      const match = /\(([^)]*)\)$/.exec(protectedRun.failure.detail);
-      if (match) view.changedProtectedPaths = match[1].split(', ').slice(0, 10);
-    }
-    if (version.sharedSetup.length > 0 && attempt.length > 0) view.changedSharedSetup = await changedSharedSetup(service, bugCase.taskId, version, attempt[0].inputTreeId);
-    const envRun = runs.find((run) => run.outcome === 'ENV_FILES_CHANGED' && run.versionId === version.id);
-    if (envRun?.failure) view.envFilesChanged = version.envFiles.map((file) => file.relativePath).filter((file) => envRun.failure!.detail.includes(file));
+    const protectedPaths = attempt.find((run) => run.outcome === 'PROTECTED_INPUT_CHANGED')?.failure?.paths;
+    if (protectedPaths?.length) view.changedProtectedPaths = protectedPaths.slice(0, 10);
+    const treeId = attempt[0]?.inputTreeId;
+    if (version.sharedSetup.length > 0 && treeId) view.changedSharedSetup = await service.changedSharedSetup(bugCase.taskId, version, treeId).catch(() => []);
+    const envPaths = runs.find((run) => run.outcome === 'ENV_FILES_CHANGED' && run.versionId === version.id)?.failure?.paths;
+    if (envPaths) view.envFilesChanged = version.envFiles.map((file) => file.relativePath).filter((file) => envPaths.includes(file));
     // A bug saved before its recording's observations were kept cannot judge a changed value.
     if (!version.recorded) view.unavailable = { 'edit-expectations': 'Record the bug again to edit them' };
   }
@@ -244,22 +242,6 @@ async function caseView(
   }
   view.actions = actionsFor(view, gate, runs);
   return view;
-}
-
-async function changedSharedSetup(service: BugReplayCore, taskId: string, version: BugCaseVersionRecord, treeId: string | undefined): Promise<string[]> {
-  if (!treeId) return [];
-  try {
-    const context = await service.access.context(taskId);
-    const before = await service.treeReader(context.worktree.worktreePath, version.baselineTreeId);
-    const after = await service.treeReader(context.worktree.worktreePath, treeId);
-    const changed: string[] = [];
-    for (const file of version.sharedSetup.slice(0, 50)) {
-      if ((await before.readText(file)) !== (await after.readText(file))) changed.push(file);
-    }
-    return changed.slice(0, 10);
-  } catch {
-    return [];
-  }
 }
 
 function resultOf(observation: BugReplayAssertionObservation): BugCheckResult {
@@ -396,6 +378,3 @@ function runView(run: StoredBugReplayRun, files: Array<{ id: string; kind: strin
     ...(run.settledAt ? { settledAt: run.settledAt } : {})
   };
 }
-
-/** The lease sheet for queued runs waiting on the person, from the waiting run's own spec. */
-export type ReplayLeaseView = BugReplayLeaseRequest;

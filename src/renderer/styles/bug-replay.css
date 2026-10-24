@@ -50,15 +50,13 @@
 /* Before the first step the address takes a path: a field, so it reads as one. */
 input.tm-bugbar__address { width: 100%; background-color: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); outline: none; }
 input.tm-bugbar__address:not(:disabled):not(:focus):hover { background-color: var(--field-hover); }
-input.tm-bugbar__address:focus { background-color: var(--field-focus); box-shadow: inset 0 0 0 1px var(--field-edge-focus); }
-.app-shell[data-input-modality='keyboard'] input.tm-bugbar__address:focus { box-shadow: inset 0 0 0 1px var(--field-edge-focus), 0 0 0 3px var(--focus-ring); }
 .tm-bugbar__size { color: var(--faint); font-size: var(--t-meta); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* While the copy starts, or after it stopped, the page's place holds what happens instead,
    anchored at the top so the list grows down without moving. */
 .tm-bugrecord__placeholder { display: grid; justify-items: center; align-content: start; padding: 24px; }
 .tm-bugrecord__progress { width: min(320px, 100%); }
-.tm-bugrecord__stopped { max-width: 320px; margin: 0; padding: 8px 12px; border-radius: var(--r-sm); background: var(--waiting-bg); color: var(--waiting-ink); font-size: var(--t-help); line-height: var(--lh-ui); }
+.tm-bugrecord__stopped { max-width: 320px; }
 
 /* A decision takes the page's place before the page exists, on the frame's top anchor. */
 .tm-bugrecord__decision { display: grid; justify-items: center; align-content: start; min-height: 0; padding: 16px; overflow-y: auto; }
@@ -142,8 +140,6 @@ input.tm-bugbar__address:focus { background-color: var(--field-focus); box-shado
 
 .tm-bugcontrol { height: var(--h-toolbar); min-width: 0; padding: 0 10px; border: 0; border-radius: var(--r-sm); background-color: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--w-regular) var(--t-help)/var(--lh-ui) var(--font-ui); }
 .tm-bugcontrol:not(:disabled):not(:focus):hover { background-color: var(--field-hover); }
-.tm-bugcontrol:focus { background-color: var(--field-focus); box-shadow: inset 0 0 0 1px var(--field-edge-focus); outline: none; }
-.app-shell[data-input-modality='keyboard'] .tm-bugcontrol:focus { box-shadow: inset 0 0 0 1px var(--field-edge-focus), 0 0 0 3px var(--focus-ring); }
 .tm-bugcontrol:disabled { background-color: var(--field-disabled); color: var(--text-disabled); }
 .tm-bugcontrol--mono { font-family: var(--font-mono); font-size: var(--t-meta); }
 .tm-bugcontrol--count { width: 88px; }
@@ -163,7 +159,6 @@ input.tm-bugbar__address:focus { background-color: var(--field-focus); box-shado
 /* Before and after: two equal columns, each framed on the checked element. */
 .tm-bug__pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-width: 880px; }
 .tm-bug__shot { display: grid; gap: 6px; min-width: 0; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: inherit; text-align: left; }
-.app-shell[data-input-modality='keyboard'] .tm-bug__shot:focus-visible { outline: 0; box-shadow: var(--focus-halo); }
 .tm-bug__caption { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
 .tm-bug__captionname { color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
 .tm-bug__caption time { color: var(--faint); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
@@ -217,8 +212,8 @@ input.tm-bugbar__address:focus { background-color: var(--field-focus); box-shado
 .tm-bugruns__open::after { content: ''; position: absolute; inset: 0; }
 .tm-bugruns__row:has(.tm-bugruns__open:active) td { background-image: linear-gradient(var(--press), var(--press)); }
 /* The row is the target: one ring, drawn inward around the row, never a second one around the word. */
-.app-shell[data-input-modality='keyboard'] .tm-bugruns__open:focus { outline: 0; box-shadow: none; }
-.app-shell[data-input-modality='keyboard'] .tm-bugruns__open:focus::after { box-shadow: var(--focus-halo-inset); }
+:root[data-input-modality='keyboard'] .tm-bugruns__open:focus { outline: 0; box-shadow: none; }
+:root[data-input-modality='keyboard'] .tm-bugruns__open:focus::after { box-shadow: var(--focus-halo-inset); }
 .tm-bug__runword { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--t-help); font-weight: var(--w-medium); white-space: nowrap; }
 
 /* Before and after in one place, switched in place. */

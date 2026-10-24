@@ -84,13 +84,13 @@ function groupByRun<T extends { runId?: string }>(records: T[]): Map<string, T[]
 
 type ReadAttachment = (id: string) => Promise<AttachmentContent>;
 
-/** One run as the person sees it: the opener, the agent's messages and steps, then the outcome. */
 /** The recorded bug a turn carried to the agent, shown with its message as an attachment is. */
 export interface TurnBug {
   title: string;
   onOpen(): void;
 }
 
+/** One run as the person sees it: the opener, the agent's messages and steps, then the outcome. */
 export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtifact, onShowDebug, attachments = [], onReadAttachment, bug }: {
   turn: SessionTurn;
   bug?: TurnBug;

@@ -125,12 +125,14 @@ export function RequestExpectation({
           <select className="tm-bugcontrol" aria-label={`Expectation on ${name}`} value={check} disabled={disabled}
             onChange={(event) => onCheck(event.target.value as 'success' | 'answered' | 'none')}>
             {REQUEST_CHECK_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            {anyStatus || check === 'none' ? <option value="none">Any status</option> : null}
+            {/* Any status leaves Sent once as the row's one expectation; a row is removed with its × only. */}
+            {(anyStatus && sentOnce) || check === 'none' ? <option value="none">Any status</option> : null}
           </select>
         ) : null}
         {sentOnce !== undefined ? (
           <label className="tm-bugcheck__option">
-            <input type="checkbox" checked={sentOnce} disabled={disabled} onChange={(event) => onSentOnce(event.target.checked)} />
+            <input type="checkbox" checked={sentOnce} disabled={disabled || (sentOnce && check === 'none')}
+              title={sentOnce && check === 'none' ? 'Remove the request instead' : undefined} onChange={(event) => onSentOnce(event.target.checked)} />
             <span>Sent once</span>
           </label>
         ) : null}

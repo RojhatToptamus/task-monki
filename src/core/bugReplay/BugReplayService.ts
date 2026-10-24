@@ -8,7 +8,7 @@ import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import type { AppEventBus } from '../runner/AppEventBus';
 import type { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
 import { createDomainEvent } from '../storage/domainEvent';
-import type { DomainEventType, Task, TaskDetailSnapshot, WorktreeRecord } from '../../shared/contracts';
+import type { DomainEventType, Task, WorktreeRecord } from '../../shared/contracts';
 import type {
   BugCaseAction,
   BugCaseReference,
@@ -29,12 +29,12 @@ import type {
 import { COUNTED_BUG_REPLAY_OUTCOMES } from '../../shared/bugReplay';
 import type { BugCaseV1 } from '../../shared/bugCase';
 import { isDomAssertion } from '../../shared/bugCase';
-import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, BugReplayFileRecord, StoredBugReplayRun } from './BugReplayRecords';
-import { computeGate, effectiveVersion, latestSets, openSetNeeds, owedRuns, verdictAttempt, verificationCovered } from './BugReplayGate';
-import { evaluateRun, qualificationOutcome, volatileComparisonIds } from './BugReplayVerdict';
+import type { BugCaseRecord, BugCaseVersionRecord, BugReplayFileRecord, StoredBugReplayRun } from './BugReplayRecords';
+import { computeGate, effectiveVersion, latestSets, openSetNeeds, owedRuns, qualificationOf, replayTerms, verdictAttempt, verificationCovered } from './BugReplayGate';
+import { evaluateRun } from './BugReplayVerdict';
 import type { BugReplayRunner } from './BugReplayRunner';
-import { deriveReplaySpec, ReplayEligibilityError, REPLAY_NAME_PATTERN, replayEnvironmentName, type ReplayTreeReader } from './ReplayDerivation';
-import { changedProtectedInputs } from './ProtectedInputs';
+import { deriveReplaySpec, ReplayEligibilityError, REPLAY_NAME_PATTERN, replayEnvironmentName } from './ReplayDerivation';
+import { changedProtectedInputs, type ProtectedTree } from './ProtectedInputs';
 import type { ReplayAuthorization } from './ReplayAuthorization';
 import { ReplayEnvironment, ReplayEnvironmentError } from './ReplayEnvironment';
 import { ReplaySourceError, ReplaySourceFreezer } from './ReplaySourceFreezer';
@@ -51,7 +51,6 @@ import {
 } from './BugReplayContext';
 import type { BugRecordingSessions, BugReplayCore, BugReplayTaskAccess, PendingReplayApproval } from './BugReplayPorts';
 import { ceilingFor, versionDigest } from './BugReplayIdentity';
-import { BUG_CASE_COMPILER_VERSION } from './BugCaseCompiler';
 import { describeRevision, EXPECTATIONS_MOVED, followedTitle, reviseBugCase } from './BugCaseRevision';
 
 /**
@@ -124,8 +123,14 @@ export class BugReplayService implements BugReplayCore {
   private heartbeat?: NodeJS.Timeout;
   private gc?: Promise<void>;
   private recording?: BugRecordingSessions;
+  /** The gate each task's last BUG_ event carried, set after commit; it only spares repeating an event. */
   private readonly lastProjection = new Map<string, string>();
+  /** Answers about two trees, which never change: kept for the newest few by `remember`. */
   private readonly suspiciousCache = new Map<string, string[]>();
+  private readonly sharedSetupCache = new Map<string, string[]>();
+  private readonly protectedCache = new Map<string, string[]>();
+  /** The approval digest each waiting run last derived. */
+  private readonly derivedDigests = new Map<string, string>();
 
   constructor(private readonly options: BugReplayServiceOptions) {
     this.environment = new ReplayEnvironment(options.runtime, options.authorization);
@@ -222,9 +227,16 @@ export class BugReplayService implements BugReplayCore {
 
   async snapshot(taskId: string): Promise<BugReplaySnapshot> {
     const snapshot = await buildBugReplaySnapshot(this, taskId, this.recording?.sessionView(taskId), this.recording?.busyElsewhere(taskId) ?? false);
-    if (snapshot.activeCase?.gate.activeRun?.waitingFor === 'APPROVAL') {
+    const view = snapshot.activeCase;
+    if (view?.gate.activeRun?.waitingFor === 'APPROVAL') {
       const lease = await this.pendingLease(taskId);
       if (lease) snapshot.pendingLease = lease;
+      else {
+        // Approving names exactly what the sheet states; without one there is nothing to approve.
+        const unavailable = { ...view.unavailable };
+        for (const action of ['allow-runs', 'always-allow-runs'] as const) if (view.actions.includes(action)) unavailable[action] = "Couldn't read what the replays run";
+        if (Object.keys(unavailable).length) view.unavailable = unavailable;
+      }
     }
     return snapshot;
   }
@@ -382,7 +394,7 @@ export class BugReplayService implements BugReplayCore {
     // A bug that did not reproduce has nothing to verify against; code already verified needs no runs.
     const owed = treeId !== version.baselineTreeId &&
       Boolean(gate) && !['NOT_REPRODUCED', 'FLAKY', 'REPRODUCTION_BLOCKED', 'CAPTURED'].includes(gate!.state) &&
-      !verificationCovered(runs, version.id, treeId, this.toolchain());
+      !verificationCovered(runs, version.id, treeId, replayTerms(this.toolchain(), active.keepBrowserStorage, version.document));
     if (owed) {
       await this.queueAttempt(taskId, active, version, treeId, setId, agentRunId, false);
       return;
@@ -486,10 +498,19 @@ export class BugReplayService implements BugReplayCore {
     const members = run.setId
       ? await this.options.store.read((reader) => this.options.store.listRuns(reader, { setId: run.setId, open: true }))
       : run.state === 'SETTLED' ? [] : [run];
-    for (const member of members) {
-      const controller = this.executing.get(member.id);
-      if (controller) controller.abort(new CancelledByPerson());
-      else await this.settleRun(member, 'CANCELED', { reason: 'CANCELED_BY_PERSON', detail: 'Canceled' });
+    await this.cancelWaiting(taskId, this.stopExecuting(members, () => new CancelledByPerson()), 'Canceled');
+  }
+
+  private async cancelWaiting(taskId: string, runs: StoredBugReplayRun[], detail: string): Promise<void> {
+    if (runs.length === 0) return;
+    const write = (tx: AppDatabaseTransaction) => {
+      for (const run of runs) this.settleIn(tx, run.id, 'CANCELED', { reason: 'CANCELED_BY_PERSON', detail });
+    };
+    if (runs.some((run) => run.caseId)) {
+      await this.commit(taskId, 'BUG_REPLAY_RUN_SETTLED', write, { runIds: runs.map((run) => run.id), outcome: 'CANCELED' });
+    } else {
+      await this.options.store.write(write);
+      this.emitUpdate(taskId);
     }
   }
 
@@ -546,7 +567,6 @@ export class BugReplayService implements BugReplayCore {
       reason: describeRevision(version.document, revised.document),
       document: revised.document,
       recorded: revised.recorded,
-      toolchain: `${this.toolchain()} ${BUG_CASE_COMPILER_VERSION}`,
       createdAt: now()
     };
     next.digest = versionDigest(next);
@@ -587,7 +607,6 @@ export class BugReplayService implements BugReplayCore {
       this.options.store.updateCase(tx, { ...current, status: 'REMOVED', updatedAt: now() }, current.revision);
       this.options.store.insertDecision(tx, { id: randomUUID(), caseId: active.id, taskId, kind: 'REMOVED', createdAt: now() });
     }, { decision: 'REMOVED' });
-    this.recording?.forgetTask(taskId);
   }
 
   /** Replace: the active bug becomes an earlier bug; a new recording becomes the active one. */
@@ -704,13 +723,20 @@ export class BugReplayService implements BugReplayCore {
     if (cached) return cached;
     const context = await this.options.access.context(taskId);
     const lines = await this.options.snapshots.addedLines(context.worktree.worktreePath, version.baselineTreeId, toTree);
-    const found = findSuspiciousLines(lines, version.document);
-    this.suspiciousCache.set(key, found);
-    if (this.suspiciousCache.size > 32) {
-      const oldest = this.suspiciousCache.keys().next().value;
-      if (oldest !== undefined) this.suspiciousCache.delete(oldest);
-    }
-    return found;
+    return remember(this.suspiciousCache, key, findSuspiciousLines(lines, version.document));
+  }
+
+  /** Shared setup files whose content differs between the recorded code and `treeId`. */
+  async changedSharedSetup(taskId: string, version: BugCaseVersionRecord, treeId: string): Promise<string[]> {
+    const key = `${version.id}:${treeId}`;
+    const cached = this.sharedSetupCache.get(key);
+    if (cached) return cached;
+    const context = await this.options.access.context(taskId);
+    const paths = version.sharedSetup.slice(0, 50);
+    const [before, after] = await Promise.all(
+      [version.baselineTreeId, treeId].map((tree) => this.options.snapshots.entriesAt(context.worktree.worktreePath, tree, paths))
+    );
+    return remember(this.sharedSetupCache, key, paths.filter((file) => before.get(file)?.blob !== after.get(file)?.blob).slice(0, 10));
   }
 
   /** Stops recording and runs of a task before it is deleted or archived; waits for teardown. */
@@ -724,6 +750,7 @@ export class BugReplayService implements BugReplayCore {
     }
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline && [...this.executing.keys()].some((id) => open.some((run) => run.id === id))) await sleep(200);
+    this.lastProjection.delete(taskId);
   }
 
   // Queue and execution
@@ -757,6 +784,8 @@ export class BugReplayService implements BugReplayCore {
         if (error instanceof RunSettled) return error;
         return new RunSettled('ENVIRONMENT_FAILED', { reason: 'START_FAILED', detail: errorMessage(error) });
       });
+      // Closing began while this run was checked: the next start checks it again.
+      if (!this.admitting) return;
       if (decision instanceof RunSettled) {
         await this.settleRun(run, decision.outcome, decision.failure);
         continue;
@@ -785,7 +814,7 @@ export class BugReplayService implements BugReplayCore {
   private async admission(run: StoredBugReplayRun): Promise<'START' | BugReplayWaitReason> {
     const records = await this.loadRunRecords(run);
     if (!records) throw new RunSettled('CANCELED', { reason: 'CANCELED_BY_PERSON', detail: 'The bug was removed.' });
-    const { version, bugCase } = records;
+    const { version } = records;
     // A run of a version the person replaced checks expectations that no longer decide anything.
     if (records.superseded) throw new RunSettled('SUPERSEDED', { reason: 'CANCELED_BY_PERSON', detail: 'A newer version of the bug replaced it' });
     const context = await this.options.access.context(run.taskId).catch((error: unknown) => {
@@ -794,13 +823,8 @@ export class BugReplayService implements BugReplayCore {
     if (['DONE', 'CANCELED', 'ARCHIVED'].includes(context.task.workflowPhase)) {
       throw new RunSettled('CANCELED', { reason: 'CANCELED_BY_PERSON', detail: 'The task is closed.' });
     }
-    // After a restart every run waits for the person again; until they allow runs, the full
-    // checks below would only repeat every heartbeat. A run whose repository kept an approval is
-    // checked, since the approval may cover it.
-    if (
-      run.state === 'WAITING' && run.waitingFor === 'APPROVAL' && !this.options.authorization.hasLease(run.taskId) &&
-      !(await this.options.store.read((reader) => this.options.store.hasKeptApprovals(reader, context.task.repositoryId)))
-    ) return 'APPROVAL';
+    // Until the person allows runs, the full checks below would only repeat every heartbeat.
+    if (run.state === 'WAITING' && run.waitingFor === 'APPROVAL' && !(await this.mayBeApproved(run, context.task.repositoryId))) return 'APPROVAL';
     const worktreePath = context.worktree.worktreePath;
     const tree = run.kind === 'CANDIDATE' ? run.inputTreeId! : version.baselineTreeId;
     if (!(await this.freezer.available(worktreePath, tree))) {
@@ -816,41 +840,65 @@ export class BugReplayService implements BugReplayCore {
           reason: 'INELIGIBLE',
           detail: run.kind === 'CANDIDATE'
             ? `Couldn't verify: ${file.relativePath} changed since the bug was recorded`
-            : `Reproduction blocked: ${file.relativePath} changed since the bug was recorded`
+            : `Reproduction blocked: ${file.relativePath} changed since the bug was recorded`,
+          paths: [file.relativePath]
         });
       }
     }
     if (run.kind === 'CANDIDATE') {
-      const changed = await changedProtectedInputs(version.protectedInputs, await this.treeReader(worktreePath, tree));
-      if (changed.length > 0) {
-        throw new RunSettled('PROTECTED_INPUT_CHANGED', {
-          reason: 'INELIGIBLE',
-          detail: `Couldn't verify: setup files changed since the recording (${changed.slice(0, 3).join(', ')}${changed.length > 3 ? ` and ${changed.length - 3} more` : ''})`
-        });
-      }
+      // The cheap waits first: a run that waits repeats these every heartbeat.
       if (await this.options.access.agentRunActive(run.taskId)) return 'AGENT_TURN';
-      const qualification = await this.qualificationFor(run, version);
+      const qualification = await this.qualificationFor(run, records.bugCase, version);
       if (qualification === 'FAILED') {
         throw new RunSettled('BLOCKED', { reason: 'NOT_REPRODUCED', detail: "Couldn't verify: the bug did not reproduce on the recorded code" });
       }
       if (qualification === 'PENDING') return 'QUALIFICATION';
+      const changed = await this.changedProtected(version, worktreePath, tree);
+      if (changed.length > 0) {
+        throw new RunSettled('PROTECTED_INPUT_CHANGED', {
+          reason: 'INELIGIBLE',
+          detail: `Couldn't verify: setup files changed since the recording (${changed.slice(0, 3).join(', ')}${changed.length > 3 ? ` and ${changed.length - 3} more` : ''})`,
+          paths: changed.slice(0, 10)
+        });
+      }
     }
     const derived = await this.derive(run, version, worktreePath, tree, '/<export>');
+    remember(this.derivedDigests, run.id, derived.approvalDigest);
     if (!(await this.approved(run.taskId, derived.approvalDigest))) return 'APPROVAL';
     if ((derived.managedDatabases.length > 0 || derived.secretIds.length > 0) && (await this.options.runtime().keystore.status()).state !== 'unlocked') {
       return 'KEYSTORE';
     }
     const capacity = await this.environment.capacity(Object.keys((derived.spec as { services?: object }).services ?? {}).length);
     if (!capacity.ok) return 'CAPACITY';
-    void bugCase;
     return 'START';
   }
 
   /**
-   * Whether a candidate's version is reproduced under the current toolchain, by the gate's own
+   * Whether a run waiting for approval could be approved now, short of its full checks: the task
+   * holds a lease, or the repository kept an approval for the digest the run last derived (any
+   * kept approval, when it has derived none since Task Monki started).
+   */
+  private async mayBeApproved(run: StoredBugReplayRun, repositoryId: string): Promise<boolean> {
+    if (this.options.authorization.hasLease(run.taskId)) return true;
+    const digest = this.derivedDigests.get(run.id);
+    return this.options.store.read((reader) =>
+      digest ? Boolean(this.options.store.keptApproval(reader, repositoryId, digest)) : this.options.store.hasKeptApprovals(reader, repositoryId)
+    );
+  }
+
+  /** The version's pinned setup inputs that differ in `tree`; neither ever changes, so it is remembered. */
+  private async changedProtected(version: BugCaseVersionRecord, worktreePath: string, tree: string): Promise<string[]> {
+    const key = `${version.id}:${tree}`;
+    const cached = this.protectedCache.get(key);
+    if (cached) return cached;
+    return remember(this.protectedCache, key, await changedProtectedInputs(version.protectedInputs, await this.treeReader(worktreePath, tree)));
+  }
+
+  /**
+   * Whether a candidate's version is reproduced under the current terms, by the gate's own
    * rules: a qualification that still runs or still owes a replacement is pending, never failed.
    */
-  private async qualificationFor(run: StoredBugReplayRun, version: BugCaseVersionRecord): Promise<'OK' | 'PENDING' | 'FAILED'> {
+  private async qualificationFor(run: StoredBugReplayRun, bugCase: BugCaseRecord, version: BugCaseVersionRecord): Promise<'OK' | 'PENDING' | 'FAILED'> {
     const runs = await this.options.store.read((reader) => this.options.store.listRuns(reader, { caseId: version.caseId }));
     const qualification = latestSets(runs, version.id).qualification ?? [];
     if (qualification.length === 0) {
@@ -859,11 +907,11 @@ export class BugReplayService implements BugReplayCore {
       return 'PENDING';
     }
     if (qualification.some((member) => member.state !== 'SETTLED') || openSetNeeds(qualification, 'BASELINE') > 0) return 'PENDING';
-    const counted = qualification.filter((member) => member.counted).slice(0, 2);
-    const outcome = qualificationOutcome(qualification, counted.map((member) => member.signatureObserved), volatileComparisonIds(version.document));
+    const outcome = qualificationOf(qualification, version.document);
     if (outcome.state === 'PENDING') return 'PENDING';
     if (outcome.state !== 'REPRODUCED') return 'FAILED';
-    if (counted.some((member) => member.toolchain !== this.toolchain())) {
+    const terms = replayTerms(this.toolchain(), bugCase.keepBrowserStorage, version.document);
+    if (qualification.some((member) => member.counted && member.toolchain !== terms)) {
       await this.queueQualification(run.taskId, version.caseId, version.id);
       return 'PENDING';
     }
@@ -882,7 +930,8 @@ export class BugReplayService implements BugReplayCore {
       context = await this.options.access.context(run.taskId);
       const worktreePath = context.worktree.worktreePath;
       const tree = run.kind === 'CANDIDATE' ? run.inputTreeId! : version.baselineTreeId;
-      run = await this.updateRun(run, { state: 'PREPARING_SOURCE', phase: 'Copying source', startedAt: now(), inputTreeId: tree, toolchain: this.toolchain(), scratchDir }, 'BUG_REPLAY_RUN_UPDATED');
+      const toolchain = replayTerms(this.toolchain(), bugCase.keepBrowserStorage, version.document);
+      run = await this.updateRun(run, { state: 'PREPARING_SOURCE', phase: 'Copying source', startedAt: now(), inputTreeId: tree, toolchain, scratchDir }, 'BUG_REPLAY_RUN_UPDATED');
       if (run.state === 'SETTLED') return;
       const envFiles = await Promise.all(version.envFiles.map(async (file) => ({
         relativePath: file.relativePath,
@@ -910,8 +959,7 @@ export class BugReplayService implements BugReplayCore {
         }
       });
       run = await this.updateRun(run, { state: 'WARMING_UP', phase: 'Warming up', previewAttemptId: environment.attemptId }, 'BUG_REPLAY_RUN_UPDATED');
-      const capture = await this.options.store.read((reader) => this.options.store.getCapture(reader, bugCase.captureId));
-      const warmFacts = await this.environment.warmUp(environment.origins, warmUpRequests(version.document, capture), controller.signal);
+      const warmFacts = await this.environment.warmUp(environment.origins, warmUpRequests(version.document), controller.signal);
       const setupChanged = await this.freezer.changedFiles(exported.sourcePath, exported.tracked);
       const readyBlobs = await this.currentBlobs(exported.sourcePath, exported.tracked, setupChanged);
       run = await this.updateRun(run, { state: 'EXECUTING', phase: 'Running the steps', setupChangedPaths: setupChanged.slice(0, 50) }, 'BUG_REPLAY_RUN_UPDATED');
@@ -940,6 +988,8 @@ export class BugReplayService implements BugReplayCore {
         ...evaluated.facts,
         ...(setupChanged.length ? [`Setup changed ${setupChanged.length} tracked files before the app was ready`] : [])
       ].slice(0, 30);
+      // An abort decides how a run ends, even when the runner finished as it came.
+      if (controller.signal.aborted) throw controller.signal.reason;
       const files = await this.publishRunFiles(run, result);
       await this.settleRun(run, evaluated.outcome, evaluated.failure, {
         observations: evaluated.observations,
@@ -1001,7 +1051,7 @@ export class BugReplayService implements BugReplayCore {
     }
   }
 
-  async treeReader(worktreePath: string, treeId: string): Promise<ReplayTreeReader> {
+  async treeReader(worktreePath: string, treeId: string): Promise<ProtectedTree> {
     const files = await this.options.snapshots.listTree(worktreePath, treeId);
     const cache = new Map<string, Promise<string | undefined>>();
     return {
@@ -1013,6 +1063,10 @@ export class BugReplayService implements BugReplayCore {
           cache.set(relativePath, read);
         }
         return read;
+      },
+      blobs: async (paths) => {
+        const entries = await this.options.snapshots.entriesAt(worktreePath, treeId, [...paths]);
+        return new Map([...entries].map(([file, entry]) => [file, entry.blob]));
       }
     };
   }
@@ -1030,15 +1084,20 @@ export class BugReplayService implements BugReplayCore {
 
   private async publishRunFiles(run: StoredBugReplayRun, result: Extract<Awaited<ReturnType<BugReplayRunner['run']>>, { kind: 'completed' }>) {
     const files: BugReplayFileRecord[] = [];
-    for (const shot of result.screenshots.slice(0, 6)) {
-      const bytes = await fs.readFile(shot.path).catch(() => undefined);
-      if (!bytes || bytes.length > 1024 * 1024) continue;
-      files.push(await this.options.store.publishFile({ taskId: run.taskId, ownerKind: 'RUN', ownerId: run.id, kind: 'SCREENSHOT', mediaType: 'image/png', bytes }));
-    }
-    const sensitive = (await this.loadRunRecords(run))?.version.document.sensitiveInputs.map((input) => input.value) ?? [];
-    const frames = Buffer.from(JSON.stringify(redactEvidence(result.frames, sensitive)), 'utf8');
-    if (frames.length <= 1024 * 1024) {
-      files.push(await this.options.store.publishFile({ taskId: run.taskId, ownerKind: 'RUN', ownerId: run.id, kind: 'RUN_FRAMES', mediaType: 'application/json', bytes: frames }));
+    try {
+      for (const shot of result.screenshots.slice(0, 6)) {
+        const bytes = await fs.readFile(shot.path).catch(() => undefined);
+        if (!bytes || bytes.length > 1024 * 1024) continue;
+        files.push(await this.options.store.publishFile({ taskId: run.taskId, ownerKind: 'RUN', ownerId: run.id, kind: 'SCREENSHOT', mediaType: 'image/png', bytes }));
+      }
+      const sensitive = (await this.loadRunRecords(run))?.version.document.sensitiveInputs.map((input) => input.value) ?? [];
+      const frames = Buffer.from(JSON.stringify(redactEvidence(result.frames, sensitive)), 'utf8');
+      if (frames.length <= 1024 * 1024) {
+        files.push(await this.options.store.publishFile({ taskId: run.taskId, ownerKind: 'RUN', ownerId: run.id, kind: 'RUN_FRAMES', mediaType: 'application/json', bytes: frames }));
+      }
+    } catch (error) {
+      await this.options.store.discardPublished(files);
+      throw error;
     }
     return files;
   }
@@ -1085,15 +1144,13 @@ export class BugReplayService implements BugReplayCore {
    */
   private async queueAttempt(taskId: string, bugCase: BugCaseRecord, version: BugCaseVersionRecord, treeId: string, setId: string, agentRunId: string | undefined, person: boolean): Promise<void> {
     const runs = await this.options.store.read((reader) => this.options.store.listRuns(reader, { caseId: bugCase.id, open: true }));
-    for (const run of runs.filter((candidate) => candidate.kind === 'CANDIDATE' || candidate.control)) {
-      const controller = this.executing.get(run.id);
-      if (controller) controller.abort(new Superseded());
-      else await this.settleRun(run, 'SUPERSEDED', { reason: 'CANCELED_BY_PERSON', detail: 'A newer turn replaced this check.' });
-    }
+    const waiting = this.stopExecuting(runs.filter((candidate) => candidate.kind === 'CANDIDATE' || candidate.control), () => new Superseded());
     const qualification = latestSets(await this.options.store.read((reader) => this.options.store.listRuns(reader, { caseId: bugCase.id })), version.id).qualification ?? [];
     const settledAt = qualification.filter((run) => run.counted).map((run) => run.settledAt ?? '').sort().pop();
     const controlDue = needsControlRun(settledAt);
     await this.commit(taskId, 'BUG_REPLAY_RUN_UPDATED', (tx) => {
+      // The older attempt's waiting runs end with the new attempt's start: one step from one to the next.
+      for (const run of waiting) this.settleIn(tx, run.id, 'SUPERSEDED', { reason: 'CANCELED_BY_PERSON', detail: 'A newer turn replaced this check.' });
       const current = this.options.store.getCase(tx, bugCase.id);
       if (current && (current.observedTreeId !== treeId || current.observedTreeIssue)) {
         const observed: BugCaseRecord = { ...current, observedTreeId: treeId, updatedAt: now() };
@@ -1178,32 +1235,64 @@ export class BugReplayService implements BugReplayCore {
   ): Promise<void> {
     const { files = [], ...fields } = extra;
     let added = 0;
+    let recorded = false;
+    let committed = false;
     const write = (tx: AppDatabaseTransaction) => {
-      const current = this.options.store.getRun(tx, run.id);
-      if (!current || current.state === 'SETTLED') return;
-      for (const file of files) this.options.store.recordFile(tx, file);
-      const next: StoredBugReplayRun = {
-        ...current,
-        ...fields,
-        state: 'SETTLED',
-        outcome,
-        counted: COUNTED_BUG_REPLAY_OUTCOMES.has(outcome),
-        settledAt: now(),
-        fileIds: [...current.fileIds, ...files.map((file) => file.id)],
-        ...(failure ? { failure } : {})
-      };
-      delete next.waitingFor;
-      delete next.phase;
-      this.options.store.updateRun(tx, next, current.revision);
+      recorded = this.settleIn(tx, run.id, outcome, failure, fields, files);
       // The replacement a settled run makes owed is queued with it, before any teardown.
-      if (current.caseId) added = this.refillIn(tx, run.taskId);
+      if (recorded && run.caseId) added = this.refillIn(tx, run.taskId);
     };
-    if (run.caseId) await this.commit(run.taskId, 'BUG_REPLAY_RUN_SETTLED', write, { runId: run.id, outcome }, options);
-    else {
-      await this.options.store.write(write);
-      this.emitUpdate(run.taskId);
+    try {
+      if (run.caseId) await this.commit(run.taskId, 'BUG_REPLAY_RUN_SETTLED', write, { runId: run.id, outcome }, { ...options, quiet: true });
+      else await this.options.store.write(write);
+      committed = true;
+    } finally {
+      // Bytes no committed row references go again: the write rolled back, or the run was settled elsewhere first.
+      if (!(committed && recorded) && files.length > 0) await this.options.store.discardPublished(files);
     }
+    if (!run.caseId || !options.quiet) this.emitUpdate(run.taskId, Boolean(run.caseId));
     if (added > 0) this.schedule();
+  }
+
+  /** Settles one run in the caller's transaction; false when it was already settled or is gone. */
+  private settleIn(
+    tx: AppDatabaseTransaction,
+    runId: string,
+    outcome: BugReplayRunOutcome,
+    failure?: BugReplayRunFailure,
+    fields: Partial<StoredBugReplayRun> = {},
+    files: BugReplayFileRecord[] = []
+  ): boolean {
+    const current = this.options.store.getRun(tx, runId);
+    if (!current || current.state === 'SETTLED') return false;
+    for (const file of files) this.options.store.recordFile(tx, file);
+    const next: StoredBugReplayRun = {
+      ...current,
+      ...fields,
+      state: 'SETTLED',
+      outcome,
+      counted: COUNTED_BUG_REPLAY_OUTCOMES.has(outcome),
+      settledAt: now(),
+      fileIds: [...current.fileIds, ...files.map((file) => file.id)],
+      ...(failure ? { failure } : {})
+    };
+    delete next.waitingFor;
+    delete next.phase;
+    this.options.store.updateRun(tx, next, current.revision);
+    return true;
+  }
+
+  /**
+   * Stops the runs that are executing, which settle when their run ends, and returns the ones
+   * still waiting. Callers settle those in one commit: one run of a set decides nothing alone,
+   * so a set is never shown half settled.
+   */
+  private stopExecuting(runs: StoredBugReplayRun[], reason: () => Error): StoredBugReplayRun[] {
+    return runs.filter((run) => {
+      const controller = this.executing.get(run.id);
+      controller?.abort(reason());
+      return !controller;
+    });
   }
 
   private notePhase(run: StoredBugReplayRun, phase: string): void {
@@ -1235,7 +1324,7 @@ export class BugReplayService implements BugReplayCore {
         const projection = this.gateIn(tx, taskId);
         const key = JSON.stringify({ ...projection, updatedAt: undefined });
         if (options.onlyIfChanged && this.lastProjection.get(taskId) === key) return projection;
-        this.lastProjection.set(taskId, key);
+        tx.afterCommit(() => this.lastProjection.set(taskId, key));
         await this.options.tasks.appendEvent(
           createDomainEvent({ type, taskId, source: 'replay', payload: { gate: projection ?? null, ...detail } })
         );
@@ -1255,12 +1344,6 @@ export class BugReplayService implements BugReplayCore {
     if (!bugCase) return undefined;
     return computeGate({
       bugCase,
-      state: {
-        ...(bugCase.handoff ? { handoff: bugCase.handoff } : {}),
-        ...(bugCase.lastSentAt ? { lastSentAt: bugCase.lastSentAt } : {}),
-        ...(bugCase.observedTreeId ? { observedTreeId: bugCase.observedTreeId } : {}),
-        ...(bugCase.observedTreeIssue ? { observedTreeIssue: bugCase.observedTreeIssue } : {})
-      },
       versions: this.options.store.listVersions(reader, bugCase.id),
       decisions: this.options.store.listDecisions(reader, bugCase.id),
       runs: this.options.store.listRuns(reader, { caseId: bugCase.id }),
@@ -1333,12 +1416,7 @@ export class BugReplayService implements BugReplayCore {
 
   private async cancelCaseRuns(taskId: string, caseId: string, detail: string): Promise<void> {
     const open = await this.options.store.read((reader) => this.options.store.listRuns(reader, { caseId, open: true }));
-    for (const run of open) {
-      const controller = this.executing.get(run.id);
-      if (controller) controller.abort(new CancelledByPerson());
-      else await this.settleRun(run, 'CANCELED', { reason: 'CANCELED_BY_PERSON', detail });
-    }
-    void taskId;
+    await this.cancelWaiting(taskId, this.stopExecuting(open, () => new CancelledByPerson()), detail);
   }
 
   private async toggleBrowserStorage(taskId: string): Promise<void> {
@@ -1515,19 +1593,16 @@ function classify(error: unknown, signal: AbortSignal): RunSettled | RunWaits {
   if (error instanceof RunSettled || error instanceof RunWaits) return error;
   if (error instanceof ReplayEligibilityError) return new RunSettled('BLOCKED', { reason: 'INELIGIBLE', detail: error.message });
   if (error instanceof ReplayEnvironmentError) {
-    const map: Record<ReplayEnvironmentError['code'], BugReplayOutcomeReason> = {
-      NOT_CLEAN: 'NOT_A_CLEAN_START',
-      START_FAILED: 'START_FAILED',
-      PREREQUISITE: 'IMAGE_MISSING',
-      CAPACITY: 'START_FAILED',
-      AUTHORIZATION: 'AUTHORIZATION_REFUSED',
-      CANCELED: 'CANCELED_BY_PERSON'
-    };
     if (error.code === 'PREREQUISITE') return new RunSettled('BLOCKED', { reason: 'IMAGE_MISSING', detail: error.message });
     if (error.code === 'CANCELED') return new RunSettled('CANCELED', { reason: 'CANCELED_BY_PERSON', detail: 'Canceled' });
     if (error.code === 'CAPACITY') return new RunWaits('CAPACITY');
+    const reasons: Record<typeof error.code, BugReplayOutcomeReason> = {
+      NOT_CLEAN: 'NOT_A_CLEAN_START',
+      START_FAILED: 'START_FAILED',
+      AUTHORIZATION: 'AUTHORIZATION_REFUSED'
+    };
     return new RunSettled('ENVIRONMENT_FAILED', {
-      reason: map[error.code],
+      reason: reasons[error.code],
       detail: `The clean copy didn't start${error.service ? ` (${error.service}: ${error.message.replace(/\.$/, '')})` : ` (${error.message.replace(/\.$/, '')})`}`
     });
   }
@@ -1549,7 +1624,7 @@ function needsControlRun(qualifiedAt: string | undefined): boolean {
 }
 
 /** GET the pages and read APIs the recording used and OPTIONS the routes it wrote to, so first compiles happen before the steps. */
-function warmUpRequests(document: BugCaseV1, capture: BugCaptureRecord | undefined): Array<{ role: string; method: 'GET' | 'OPTIONS'; path: string }> {
+function warmUpRequests(document: BugCaseV1): Array<{ role: string; method: 'GET' | 'OPTIONS'; path: string }> {
   const requests: Array<{ role: string; method: 'GET' | 'OPTIONS'; path: string }> = [];
   const seen = new Set<string>();
   const add = (role: string, method: 'GET' | 'OPTIONS', target: string) => {
@@ -1565,10 +1640,15 @@ function warmUpRequests(document: BugCaseV1, capture: BugCaptureRecord | undefin
     if (assertion.kind !== 'request') continue;
     add(assertion.origin, assertion.method === 'GET' ? 'GET' : 'OPTIONS', assertion.pathTemplate);
   }
-  void capture;
   return requests.slice(0, 24);
 }
 
+/** Keeps `value` under `key`, forgetting the oldest beyond the newest 32. */
+function remember<T>(cache: Map<string, T>, key: string, value: T): T {
+  cache.set(key, value);
+  if (cache.size > 32) cache.delete(cache.keys().next().value!);
+  return value;
+}
 
 function sha256(bytes: Buffer | string): string {
   return createHash('sha256').update(bytes).digest('hex');

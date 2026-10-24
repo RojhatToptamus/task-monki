@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PreviewError, type PreviewRuntime, type PreviewSpec, type PreviewStatus } from 'previewhost';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
+import type { BugReplayGateProjection } from '../../shared/bugReplay';
 import type { WorktreeRecord } from '../../shared/contracts';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
@@ -14,7 +15,7 @@ import { CAPTURE_ID, TOTAL_PICK, bugCaseRecord, captureRecord, checkoutCase, che
 import { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
 import { AppEventBus } from '../runner/AppEventBus';
 import type { BugReplayFileRecord, StoredBugReplayRun } from './BugReplayRecords';
-import { BugRecordingService, type RecordingBrowserHost } from './BugRecordingService';
+import { BugRecordingService, type RecordingBrowserHost, type RecordingViewInput } from './BugRecordingService';
 import { BugReplayRunner, type BugReplayRunnerRequest, type BugReplayRunnerResult } from './BugReplayRunner';
 import { BugReplayService } from './BugReplayService';
 import { ReplayAuthorization } from './ReplayAuthorization';
@@ -167,13 +168,15 @@ async function openWorkspace() {
   const exportRoot = path.join(root, 'previewhost', 'sources', 'bug-replay');
   const scratchRoot = path.join(root, 'profile', 'bug-replay', 'runs');
   const worktree = { id: 'worktree-1', taskId: task.id, worktreePath: repo } as unknown as WorktreeRecord;
+  // The app's one bus: a service opened again after a restart announces on it too.
+  const events = new AppEventBus();
 
   const open = () => {
     const runner = new ScriptedRunner();
     const service = new BugReplayService({
       store: persistence.bugReplay,
       tasks: persistence.tasks,
-      events: new AppEventBus(),
+      events,
       runtime: () => runtime as unknown as PreviewRuntime,
       authorization: new ReplayAuthorization(() => runtime as unknown as PreviewRuntime),
       snapshots,
@@ -203,7 +206,7 @@ async function openWorkspace() {
 
   const { service, runner } = open();
   await service.init();
-  return { root, repo, runtime, persistence, store: persistence.bugReplay, task, snapshots, service, runner, open };
+  return { root, repo, runtime, persistence, store: persistence.bugReplay, task, snapshots, events, service, runner, open };
 }
 
 type Workspace = Awaited<ReturnType<typeof openWorkspace>>;
@@ -239,6 +242,45 @@ async function allowRuns(w: Workspace, service = w.service): Promise<void> {
 
 function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex');
+}
+
+/** The agent's fix: the coupon takes $5 off once. */
+const FIXED_SERVER = "require('http').createServer((q, s) => s.end('total $45.00')).listen(process.env.PORT);\n";
+/**
+ * The same fix computing the total, at another length than the recorded file, so a capture never
+ * takes it for the recorded file by size and time alone.
+ */
+const COMPUTED_FIX = "require('http').createServer((q, s) => s.end('total $' + (50 - 5).toFixed(2))).listen(process.env.PORT);\n";
+
+/** A run as the store holds it, for writing what an earlier process left behind. */
+function storedRun(w: Workspace, fields: Partial<StoredBugReplayRun> & Pick<StoredBugReplayRun, 'kind' | 'state'>): StoredBugReplayRun {
+  return {
+    id: randomUUID(),
+    taskId: w.task.id,
+    counted: false,
+    name: `br-${randomBytes(6).toString('hex')}`,
+    observations: [],
+    facts: [],
+    fileIds: [],
+    queuedAt: new Date().toISOString(),
+    revision: 1,
+    toolchain: 'toolchain-1',
+    ...fields
+  };
+}
+
+/** The bug as each BUG_ event stored for the task carried it, oldest first. */
+async function publishedGates(w: Workspace) {
+  const { events } = await w.persistence.tasks.getTaskDetail(w.task.id);
+  return events
+    .filter((event) => event.type.startsWith('BUG_'))
+    .map((event) => ({ type: event.type, ...(event.payload as { gate: BugReplayGateProjection | null; runIds?: string[] }) }));
+}
+
+/** The refs that pin trees in the private snapshot store. */
+async function snapshotRefs(w: Workspace): Promise<string> {
+  const [store] = await fs.readdir(path.join(w.root, 'snapshots'));
+  return git(w.root, ['--git-dir', path.join(w.root, 'snapshots', store), 'for-each-ref', '--format=%(refname)']);
 }
 
 describe('Clean runs of a recorded bug', () => {
@@ -302,7 +344,7 @@ describe('Clean runs of a recorded bug', () => {
     await until(() => w.runtime.statuses.size === 0, 'the clean copies to be removed');
   }, 60_000);
 
-  it('queues the replacement for a run that could not start in the same step that settles it', async () => {
+  it('runs a replacement for a run Previewhost did not answer for, in the same set, so the bug still reproduces', async () => {
     const w = await openWorkspace();
     const { version } = await savedBug(w);
     await w.service.queueQualification(w.task.id, version.caseId, version.id);
@@ -314,6 +356,48 @@ describe('Clean runs of a recorded bug', () => {
     const set = await runs(w);
     expect(set.map((run) => run.outcome).sort()).toEqual(['ENVIRONMENT_FAILED', 'REPRODUCED', 'REPRODUCED']);
     expect(new Set(set.map((run) => run.setId)).size).toBe(1);
+  }, 60_000);
+
+  it('settles a run that could not start only together with the replacement it makes owed', async () => {
+    const w = await openWorkspace();
+    const { version } = await savedBug(w);
+    // One run of the qualification reproduced the bug; its partner waits to start.
+    const setId = randomUUID();
+    const started = Date.now();
+    const reproduced = storedRun(w, {
+      kind: 'BASELINE', state: 'SETTLED', caseId: version.caseId, versionId: version.id, setId, outcome: 'REPRODUCED', counted: true,
+      inputTreeId: version.baselineTreeId, queuedAt: new Date(started).toISOString(), settledAt: new Date(started).toISOString()
+    });
+    const waiting = storedRun(w, { kind: 'BASELINE', state: 'QUEUED', caseId: version.caseId, versionId: version.id, setId, queuedAt: new Date(started + 1).toISOString() });
+    await w.store.write((tx) => {
+      w.store.insertRun(tx, reproduced);
+      w.store.insertRun(tx, waiting);
+    });
+    w.service.schedule();
+    await until(async () => (await runs(w)).find((run) => run.id === waiting.id)?.waitingFor === 'APPROVAL', 'the run to ask for permission');
+
+    // Previewhost does not answer when the run is admitted, and the write that would queue its replacement fails.
+    w.runtime.listFailures = Number.MAX_SAFE_INTEGER;
+    let refused = 0;
+    const insertRun = vi.spyOn(w.store, 'insertRun').mockImplementation(() => {
+      refused += 1;
+      throw new Error('disk I/O error');
+    });
+    await allowRuns(w);
+    await until(() => refused > 0, 'the settling write to fail');
+
+    // Nothing of that write stays: the run is not recorded as ended without its replacement.
+    const kept = await runs(w);
+    expect(kept.map((run) => run.id).sort()).toEqual([reproduced.id, waiting.id].sort());
+    expect(kept.find((run) => run.id === waiting.id)).toMatchObject({ state: 'WAITING' });
+
+    // Once writes succeed, the next refusal settles it and queues its replacement in one write.
+    insertRun.mockRestore();
+    w.service.schedule();
+    await until(async () => (await runs(w)).find((run) => run.id === waiting.id)?.state === 'SETTLED', 'the run to settle');
+    const set = await runs(w);
+    expect(set.find((run) => run.id === waiting.id)).toMatchObject({ outcome: 'ENVIRONMENT_FAILED', failure: { reason: 'START_FAILED' } });
+    expect(set.filter((run) => run.setId === setId)).toHaveLength(3);
   }, 60_000);
 
   it('never reopens a run once it settled', async () => {
@@ -333,16 +417,36 @@ describe('Clean runs of a recorded bug', () => {
 
 describe('Whether a verdict is about the files the worktree holds', () => {
   /** A bug reproduced on the recorded code and verified fixed on the worktree's current files. */
-  async function verifiedFix(w: Workspace) {
+  async function verifiedFix(w: Workspace, fix = FIXED_SERVER) {
     const { version } = await savedBug(w);
     await w.service.queueQualification(w.task.id, version.caseId, version.id);
     await allowRuns(w);
     await until(async () => (await gate(w))?.state === 'REPRODUCED', 'the bug to reproduce');
-    await fs.writeFile(path.join(w.repo, 'server.js'), "require('http').createServer((q, s) => s.end('total $45.00')).listen(process.env.PORT);\n");
+    await fs.writeFile(path.join(w.repo, 'server.js'), fix);
     w.runner.fallback = async (request) => completed(request, '$45.00');
     await w.service.verifyAgain(w.task.id);
     await until(async () => (await gate(w))?.state === 'FIX_VERIFIED', 'the fix to verify');
   }
+
+  it('marks a verified fix out of date wherever it shows once a tracked file changes, and current again when the file goes back', async () => {
+    const w = await openWorkspace();
+    await verifiedFix(w, COMPUTED_FIX);
+    const verified = await gate(w);
+    // What the board, the Overview and Mark done read.
+    const shown = async () => (await w.persistence.tasks.getTask(w.task.id))?.projection.bugReplay;
+
+    await fs.appendFile(path.join(w.repo, 'server.js'), '// a later edit\n');
+
+    const currency = await w.service.checkCurrency(w.task.id);
+    expect(currency.state).toBe('STALE');
+    expect(currency.treeId).toBeDefined();
+    expect(currency.treeId).not.toBe(verified?.verdictTreeId);
+    expect(await shown()).toMatchObject({ state: 'STALE', verdictTreeId: verified?.verdictTreeId });
+
+    await fs.writeFile(path.join(w.repo, 'server.js'), COMPUTED_FIX);
+    expect(await w.service.checkCurrency(w.task.id)).toEqual({ state: 'CURRENT', treeId: verified?.verdictTreeId });
+    expect(await shown()).toMatchObject({ state: 'FIX_VERIFIED', verdictTreeId: verified?.verdictTreeId });
+  }, 60_000);
 
   it('makes no verdict current while the files cannot be copied, and recovers once they can', async () => {
     const w = await openWorkspace();
@@ -398,10 +502,113 @@ describe('Whether a verdict is about the files the worktree holds', () => {
     expect((await runs(w)).length).toBeLessThanOrEqual(60);
     const left = new Set((await runs(w)).map((run) => run.setId));
     expect(left.has(old[0].setId)).toBe(false);
-    const refs = git(w.root, ['--git-dir', (await fs.readdir(path.join(w.root, 'snapshots'))).map((name) => path.join(w.root, 'snapshots', name))[0], 'for-each-ref', '--format=%(refname)']);
+    const refs = await snapshotRefs(w);
     expect(refs).not.toContain(`attempt-${old[0].setId}`);
     expect(refs).toContain(`attempt-${old.at(-1)!.setId}`);
   }, 90_000);
+});
+
+describe('Ending a set of runs that has not started', () => {
+  it('hands a waiting verification over to a newer turn’s in one step, never showing the older one cut short', async () => {
+    const w = await openWorkspace();
+    const { version } = await savedBug(w);
+    await w.service.queueQualification(w.task.id, version.caseId, version.id);
+    await allowRuns(w);
+    await until(async () => (await gate(w))?.state === 'REPRODUCED', 'the bug to reproduce');
+    // The permission ended, so the verification of the agent's fix waits for the person.
+    w.service.authorization.clear();
+    await fs.writeFile(path.join(w.repo, 'server.js'), COMPUTED_FIX);
+    await w.service.verifyAgain(w.task.id);
+    const candidates = async () => (await runs(w)).filter((run) => run.kind === 'CANDIDATE');
+    await until(async () => (await candidates()).filter((run) => run.waitingFor === 'APPROVAL').length === 2, 'the verification to wait');
+    const older = await candidates();
+    const before = (await publishedGates(w)).length;
+
+    // The agent's next turn leaves other code while that verification still waits.
+    await fs.appendFile(path.join(w.repo, 'server.js'), '// the next turn\n');
+    await w.service.verifyAgain(w.task.id);
+    const isOlder = (run: StoredBugReplayRun) => older.some((candidate) => candidate.id === run.id);
+    await until(async () => (await candidates()).filter((run) => !isOlder(run) && run.waitingFor === 'APPROVAL').length === 2, 'the newer verification to wait');
+
+    const newer = (await candidates()).filter((run) => !isOlder(run));
+    const newerTree = newer[0].inputTreeId;
+    expect(newerTree).toBeDefined();
+    expect(newerTree).not.toBe(older[0].inputTreeId);
+    expect((await candidates()).filter(isOlder).map((run) => [run.outcome, run.failure?.detail])).toEqual([
+      ['SUPERSEDED', 'A newer turn replaced this check.'],
+      ['SUPERSEDED', 'A newer turn replaced this check.']
+    ]);
+    // Every state published since is the newer verification's: the older pair was never shown
+    // half ended, as a check that couldn't run, or as no verification at all.
+    const since = (await publishedGates(w)).slice(before);
+    expect(since.length).toBeGreaterThan(0);
+    for (const published of since) expect(published.gate).toMatchObject({ state: 'VERIFYING', candidate: { treeId: newerTree } });
+  }, 60_000);
+
+  it('cancels a waiting pair in one step, never showing half of it', async () => {
+    const w = await openWorkspace();
+    const { version } = await savedBug(w);
+    await w.service.queueQualification(w.task.id, version.caseId, version.id);
+    await until(async () => (await runs(w)).every((run) => run.state === 'WAITING' && run.waitingFor === 'APPROVAL'), 'both runs to wait');
+    const pair = await runs(w);
+    const before = (await publishedGates(w)).length;
+
+    await w.service.cancelRun(w.task.id, pair[0].id);
+
+    expect((await runs(w)).map((run) => run.outcome)).toEqual(['CANCELED', 'CANCELED']);
+    const since = (await publishedGates(w)).slice(before);
+    expect(since).toHaveLength(1);
+    expect(since[0]).toMatchObject({ type: 'BUG_REPLAY_RUN_SETTLED', runIds: expect.arrayContaining(pair.map((run) => run.id)), gate: { state: 'REPRODUCTION_BLOCKED' } });
+    expect(since[0].gate?.activeRun).toBeUndefined();
+  }, 60_000);
+});
+
+describe('Starting after a crash', () => {
+  it('settles what a crash left mid-flight: the run cut short is owed again, queued work and replacements wait for the person, the recording and every copy go', async () => {
+    const w = await openWorkspace();
+    const { version } = await savedBug(w);
+    // Task Monki closed cleanly; what follows is what a crash leaves behind instead.
+    w.service.beginShutdown();
+    await w.service.drain();
+    const bug = { caseId: version.caseId, versionId: version.id };
+    const at = (offset: number) => new Date(Date.now() + offset).toISOString();
+    // A qualification whose second run was executing, beside the run that reproduced the bug.
+    const qualification = randomUUID();
+    const reproduced = storedRun(w, { ...bug, kind: 'BASELINE', state: 'SETTLED', setId: qualification, outcome: 'REPRODUCED', counted: true, inputTreeId: version.baselineTreeId, queuedAt: at(0), settledAt: at(0) });
+    const executing = storedRun(w, { ...bug, kind: 'BASELINE', state: 'EXECUTING', setId: qualification, phase: 'Running the steps', inputTreeId: version.baselineTreeId, queuedAt: at(1), startedAt: at(1) });
+    // A verification of the agent's fix queued behind it.
+    const attemptSet = randomUUID();
+    await fs.writeFile(path.join(w.repo, 'server.js'), COMPUTED_FIX);
+    const { treeId: fixTree } = await w.service.freezer.capture(w.repo, w.task.id, `attempt-${attemptSet}`);
+    const queued = [2, 3].map((offset) => storedRun(w, { ...bug, kind: 'CANDIDATE', state: 'QUEUED', setId: attemptSet, inputTreeId: fixTree, queuedAt: at(offset) }));
+    // A recording in progress, with the code it pinned.
+    const recording = storedRun(w, { kind: 'RECORD', state: 'EXECUTING', queuedAt: at(4), startedAt: at(4) });
+    await w.service.freezer.capture(w.repo, w.task.id, `record-${recording.id}`);
+    await w.store.write((tx) => {
+      for (const run of [reproduced, executing, ...queued, recording]) w.store.insertRun(tx, run);
+    });
+    // The executing run's clean copy is still in Previewhost.
+    const attempt = { id: 'attempt-crashed', state: 'ready', services: { web: { type: 'command', state: 'ready' } } };
+    w.runtime.statuses.set(executing.name, { name: executing.name, active: attempt, latest: attempt } as unknown as PreviewStatus);
+    expect(await snapshotRefs(w)).toContain(`record-${recording.id}`);
+
+    const restarted = w.open();
+    await restarted.service.init();
+
+    const after = await w.store.read((reader) => w.store.listRuns(reader, { taskId: w.task.id }));
+    const stored = (id: string) => after.find((run) => run.id === id);
+    expect(stored(executing.id)).toMatchObject({ state: 'SETTLED', outcome: 'INTERRUPTED', failure: { reason: 'SHUTDOWN' } });
+    for (const run of queued) expect(stored(run.id)).toMatchObject({ state: 'WAITING', waitingFor: 'APPROVAL' });
+    expect(stored(recording.id)).toMatchObject({ state: 'SETTLED', outcome: 'DISCARDED' });
+    expect(await snapshotRefs(w)).not.toContain(`record-${recording.id}`);
+    // The run the crash cut short is owed again, in its own set.
+    const replacements = after.filter((run) => run.setId === qualification && run.id !== reproduced.id && run.id !== executing.id);
+    expect(replacements).toEqual([expect.objectContaining({ kind: 'BASELINE' })]);
+    await until(async () => (await runs(w)).find((run) => run.id === replacements[0].id)?.waitingFor === 'APPROVAL', 'the replacement to ask for permission');
+    await until(() => !w.runtime.statuses.has(executing.name), 'the crash’s clean copy to be torn down');
+    // Nothing starts until the person allows runs again.
+    expect(w.runtime.started).toEqual([]);
+  }, 60_000);
 });
 
 /** A recorded page as the in-app browser host would open it, with the bug already marked. */
@@ -449,17 +656,20 @@ describe('Saving a recording', () => {
     await recording.mark(sessionId);
     await until(() => recording.sessionView(w.task.id)?.phase === 'MARKING' && !recording.sessionView(w.task.id)?.detail, 'the pick');
 
-    const announced = vi.spyOn(w.service, 'emitUpdate');
+    // What the renderer hears: each update of the task's bug, as the app's bus carries it.
+    let announced = 0;
+    const stop = w.events.on((event) => {
+      if (event.type === 'bugReplay.updated' && event.taskId === w.task.id) announced += 1;
+    });
+    onTestFinished(stop);
     const named = totalDraft({ title: 'Coupon is applied twice', statement: 'Seen at checkout.' });
     recording.preview(sessionId, named);
-    expect(announced).toHaveBeenCalledWith(w.task.id);
+    expect(announced).toBe(1);
     expect(recording.sessionView(w.task.id)?.capture?.draft).toMatchObject({ title: 'Coupon is applied twice', statement: 'Seen at checkout.' });
 
     // The same draft again changes nothing and says nothing.
-    announced.mockClear();
     recording.preview(sessionId, { ...named });
-    expect(announced).not.toHaveBeenCalled();
-    announced.mockRestore();
+    expect(announced).toBe(1);
     await recording.cancel(sessionId);
   }, 60_000);
 
@@ -503,6 +713,37 @@ describe('Saving a recording', () => {
     expect(new Set(saved.map((run) => run.setId)).size).toBe(1);
     expect(await gate(w)).toMatchObject({ state: 'REPRODUCING', title: 'Coupon total is wrong' });
     await until(() => !w.runtime.statuses.has(w.runtime.started[0]), 'the recording’s clean copy to be removed');
+  }, 60_000);
+});
+
+describe('A recording that stops while the bug is marked', () => {
+  it('keeps what was marked markable, and stops there once the person goes back to recording', async () => {
+    let notify: RecordingViewInput['notify'] | undefined;
+    const base = stubHost();
+    const host: RecordingBrowserHost = {
+      open: async (input) => {
+        notify = input.notify;
+        return base.open(input);
+      }
+    };
+    const w = await openWorkspace();
+    const recording = new BugRecordingService(w.service, () => host, async () => undefined);
+    w.service.attachRecording(recording);
+    await recording.start(w.task.id);
+    await until(() => recording.sessionView(w.task.id)?.phase === 'NEEDS_APPROVAL', 'the recording to ask for permission');
+    await w.service.allowRuns(w.task.id, recording.sessionView(w.task.id)!.lease!.approvalDigest);
+    await until(() => recording.sessionView(w.task.id)?.phase === 'RECORDING', 'the page to open');
+    const { sessionId } = recording.sessionView(w.task.id)!;
+    await recording.mark(sessionId);
+    await until(() => recording.sessionView(w.task.id)?.phase === 'MARKING' && !recording.sessionView(w.task.id)?.detail, 'the pick');
+
+    notify!({ kind: 'interrupted', reason: 'The recording view closed (crashed)' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(recording.sessionView(w.task.id)).toMatchObject({ phase: 'MARKING' });
+
+    await recording.returnToRecording(sessionId);
+    expect(recording.sessionView(w.task.id)).toMatchObject({ phase: 'INTERRUPTED', failure: { title: 'The recording view closed (crashed)' } });
+    await recording.cancel(sessionId);
   }, 60_000);
 });
 

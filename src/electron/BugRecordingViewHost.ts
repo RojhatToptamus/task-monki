@@ -129,6 +129,8 @@ interface ActiveRecording {
   session: RecordingSession;
   view: RecordingView;
   recorder: RecorderSession;
+  /** The case's CSS viewport the page is pinned to. */
+  viewport: { width: number; height: number };
   allowed: Set<string>;
   attached: boolean;
   requestId: number;
@@ -220,6 +222,7 @@ export class BugRecordingViewHost implements RecordingBrowserHost {
       session,
       view,
       recorder,
+      viewport: input.environment.viewport,
       allowed,
       attached: false,
       requestId: -1,
@@ -233,12 +236,7 @@ export class BugRecordingViewHost implements RecordingBrowserHost {
     };
     this.active = active;
     session.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
-      const allowedRequest = this.allowRequest(active, details);
-      if (!allowedRequest) {
-        const host = hostOf(details.url);
-        if (host) recorder.noteBlocked(host);
-      }
-      callback({ cancel: !allowedRequest });
+      callback({ cancel: !this.allowRequest(active, details) });
     });
     session.setPermissionCheckHandler(() => false);
     session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -318,7 +316,7 @@ export class BugRecordingViewHost implements RecordingBrowserHost {
         if (contents.isDestroyed() || !active.attached) return Buffer.alloc(0);
         const image = await contents.capturePage();
         if (image.isEmpty()) return Buffer.alloc(0);
-        const fitted = image.getSize().width > 1280 ? image.resize({ width: 1280, quality: 'good' }) : image;
+        const fitted = image.getSize().width > active.viewport.width ? image.resize({ width: active.viewport.width, quality: 'good' }) : image;
         return fitted.toPNG();
       }
     };
@@ -358,8 +356,7 @@ export class BugRecordingViewHost implements RecordingBrowserHost {
   }
 
   private async fit(active: ActiveRecording, bounds: BugRecordingViewBounds): Promise<void> {
-    const viewport = { width: 1280, height: 800 };
-    const scale = Math.min(1, bounds.width / viewport.width, bounds.height / viewport.height);
+    const scale = Math.min(1, bounds.width / active.viewport.width, bounds.height / active.viewport.height);
     const rounded = Math.max(0.25, Math.round(scale * 1000) / 1000);
     if (active.scale === rounded || active.closing) return;
     active.scale = rounded;
@@ -438,15 +435,6 @@ function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
 function originOf(candidate: string): string | undefined {
   try {
     return new URL(candidate).origin;
-  } catch {
-    return undefined;
-  }
-}
-
-function hostOf(candidate: string): string | undefined {
-  try {
-    const parsed = new URL(candidate);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'ws:' || parsed.protocol === 'wss:' ? parsed.host : undefined;
   } catch {
     return undefined;
   }

@@ -1,12 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { BugRecordingSessionView } from '../../../shared/bugReplay';
 import { taskManagerApi } from '../../api/taskManagerClient';
+import { formatElapsed } from '../../model/agentSession';
 import {
   bugActionLabel,
   canReturnToRecording,
   fitRecordingViewport,
-  formatElapsed,
-  recordingHead,
+  clockSince,
+  recordingTitle,
   recordingViewVisible,
   startStepList
 } from '../../model/bugReplay';
@@ -41,6 +42,7 @@ export function BugRecordingWorkspace({
   covered,
   onSaved,
   onAskPreviewAgent,
+  onModalOpenChange,
   replaces
 }: {
   taskId: string;
@@ -51,10 +53,12 @@ export function BugRecordingWorkspace({
   covered: boolean;
   onSaved(withCheck: boolean): void;
   onAskPreviewAgent?(text: string): void;
+  /** Told while Discard asks, so the page behind it is inert. */
+  onModalOpenChange?(open: boolean): void;
 }) {
   const sessionId = recording.sessionId;
   const phase = recording.phase;
-  const head = recordingHead(recording);
+  const title = recordingTitle(recording);
   const [busy, setBusy] = useState<string>();
   // An action that failed says so under the head: the page covers the window's notices.
   const [failed, setFailed] = useState<{ phase: string; message: string }>();
@@ -162,8 +166,8 @@ export function BugRecordingWorkspace({
   const viewport = recording.viewport ?? { width: 1280, height: 800 };
   const size = fitRecordingViewport(stage, viewport);
   const elapsed = phase === 'RECORDING'
-    ? formatElapsed(recording.recordingStartedAt, now)
-    : starting ? formatElapsed(recording.startedAt, now) : undefined;
+    ? clockSince(recording.recordingStartedAt, now)
+    : starting ? clockSince(recording.startedAt, now) : undefined;
   const failure = recording.failure;
   // Something counts while it lasts: the line says so with the live shimmer and its time.
   const liveLine = phase === 'RECORDING' || starting || phase === 'SAVING';
@@ -173,11 +177,11 @@ export function BugRecordingWorkspace({
     : startStepList(recording.progress ?? []);
 
   return (
-    <section ref={workspaceRef} className="tm-bugrecord" aria-label="Record a bug" data-phase={phase.toLowerCase()}>
+    <section ref={workspaceRef} className="tm-bugrecord" aria-label="Record a bug" data-phase={phase.toLowerCase()} data-pending={busy ? true : undefined}>
       <header className="tm-bugrecord__head">
         <div className="tm-bugrecord__status">
           {/* Only the step is announced; the clock beside it is not read every second. */}
-          <strong className={`tm-bugrecord__title${liveLine ? ' tm-shimmer' : ''}`} role="status">{head.title}</strong>
+          <strong className={`tm-bugrecord__title${liveLine ? ' tm-shimmer' : ''}`} role="status">{title}</strong>
           {elapsed ? <span className="tm-bugrecord__elapsed" aria-hidden="true">{elapsed}</span> : null}
           {recording.coverageNote && (phase === 'RECORDING' || phase === 'MARKING') ? (
             <span className="tm-bugrecord__coverage" title={recording.coverageNote}>{recording.coverageNote}</span>
@@ -197,7 +201,7 @@ export function BugRecordingWorkspace({
               Back to recording
             </button>
           ) : null}
-          {phase === 'FAILED' || phase === 'SAVING' || decision ? null : (
+          {phase === 'SAVING' || decision ? null : (
             <button type="button" className="ghost-button" disabled={Boolean(busy)}
               onClick={() => (keepsSteps ? setConfirmDiscard(true) : void discard())}>
               {keepsSteps ? 'Discard' : 'Cancel'}
@@ -333,7 +337,7 @@ export function BugRecordingWorkspace({
                         />
                       </div>
                     ) : phase === 'INTERRUPTED' && failure ? (
-                      <p className="tm-bugrecord__stopped" role="note">{failure.title}</p>
+                      <p className="tm-notice tm-bugrecord__stopped" data-tone="waiting" role="note">{failure.title}</p>
                     ) : null}
                   </div>
                 )}
@@ -359,6 +363,7 @@ export function BugRecordingWorkspace({
           confirmLabel="Discard recording"
           busyLabel="Discarding…"
           busy={busy === 'discard'}
+          onOpenChange={onModalOpenChange}
           onKeep={() => setConfirmDiscard(false)}
           onConfirm={() => void discard()} />
       ) : null}</Presence>
@@ -375,7 +380,7 @@ function stepTime(step: { startedAt?: string; endedAt?: string; state: string } 
   const seconds = Math.max(0, Math.round((ended - started) / 1000));
   // A step that took under a second has no time worth reading.
   if (step.endedAt && seconds < 1) return {};
-  return { meta: seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` };
+  return { meta: formatElapsed(ended - started) };
 }
 
 /** Now, every second while something counts. */

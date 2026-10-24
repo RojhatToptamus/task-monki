@@ -1,10 +1,12 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BugCaseView, BugExpectationsDraft, BugReplayGateState, BugReplayRunView, BugReplaySnapshot } from '../../../shared/bugReplay';
 import { taskManagerApi } from '../../api/taskManagerClient';
 import { BugNowPanel, BugSection, useBugActions } from './BugSection';
 
-vi.mock('../../api/taskManagerClient', () => ({ taskManagerApi: { allowBugReplayRuns: vi.fn(async () => undefined) } }));
+vi.mock('../../api/taskManagerClient', () => ({
+  taskManagerApi: { allowBugReplayRuns: vi.fn(async () => undefined), previewBugExpectations: vi.fn(), saveBugExpectations: vi.fn() }
+}));
 
 const AT = '2026-10-18T10:00:00.000Z';
 
@@ -67,12 +69,14 @@ function snapshot(view: BugCaseView, runs: BugReplayRunView[] = []): BugReplaySn
   return { taskId: 'task-1', availability: { canRecord: true }, runs, runCount: runs.length, earlierCases: [], storage: { usedBytes: 0, limitBytes: 1 }, activeCase: view };
 }
 
-/** The Overview's Bug section with its dialogs, as the task page mounts them. */
+/** The Overview's Bug section with its dialogs, as the task page mounts them: inert while one is open. */
 function Section({ value }: { value: BugReplaySnapshot }) {
   const actions = useBugActions('task-1', value, { onOpenRecording: vi.fn(), onError: vi.fn() }, vi.fn());
   return (
     <>
-      <BugSection taskId="task-1" snapshot={value} actions={actions} onOpenRecording={vi.fn()} />
+      <main inert={actions.modalOpen ? true : undefined}>
+        <BugSection taskId="task-1" snapshot={value} actions={actions} onOpenRecording={vi.fn()} />
+      </main>
       {actions.dialogs}
     </>
   );
@@ -84,6 +88,10 @@ function NowPanel({ value }: { value: BugReplaySnapshot }) {
 }
 
 describe('A recorded bug on the Overview', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('shows what each expectation showed before the fix and after it, and marks an After about earlier code', () => {
     const view = render(<Section value={snapshot(bugCase('FIX_VERIFIED'))} />);
 
@@ -123,6 +131,8 @@ describe('A recorded bug on the Overview', () => {
     fireEvent.click(row);
 
     const drawer = await screen.findByRole('dialog', { name: 'Replay after the fix' });
+    // The page behind the drawer takes no keys or reading while it is open.
+    expect(document.querySelector('main')!.hasAttribute('inert')).toBe(true);
     // Focus starts in the replay, never on its close button, whose tooltip would take the first Escape.
     await waitFor(() => expect(drawer.contains(document.activeElement)).toBe(true));
     expect(document.activeElement).not.toBe(within(drawer).getByRole('button', { name: 'Close replay' }));
@@ -136,6 +146,7 @@ describe('A recorded bug on the Overview', () => {
 
     fireEvent.keyDown(drawer, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(document.querySelector('main')!.hasAttribute('inert')).toBe(false);
     expect(document.activeElement).toBe(row);
   });
 
@@ -157,7 +168,6 @@ describe('A recorded bug on the Overview', () => {
     const approve = screen.getByRole('button', { name: 'Approve replays' });
     expect(decline.compareDocumentPosition(keep) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(keep.compareDocumentPosition(approve) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(approve.className).toContain('primary-button');
 
     // Approving for now keeps nothing; keeping names the same sheet the person read.
     fireEvent.click(approve);
@@ -167,14 +177,13 @@ describe('A recorded bug on the Overview', () => {
   });
 
   it('changes an expectation from the bug’s menu, refusing a value the recording already shows, and saves it as the next version', async () => {
-    const previewBugExpectations = vi.fn(async ({ draft }: { draft: BugExpectationsDraft }) => {
+    const previewBugExpectations = vi.mocked(taskManagerApi.previewBugExpectations).mockImplementation(async ({ draft }: { draft: BugExpectationsDraft }) => {
       const edit = draft.expectations[0];
       return edit?.kind === 'element' && edit.expected === '$40.00'
         ? { versionId: 'version-1', changed: true, reproducible: false, reason: 'Cart total matches the recording', checks: [] }
         : { versionId: 'version-1', changed: true, reproducible: true, checks: [] };
     });
-    const saveBugExpectations = vi.fn(async () => snapshot(bugCase('REPRODUCING')));
-    Object.assign(taskManagerApi, { previewBugExpectations, saveBugExpectations });
+    const saveBugExpectations = vi.mocked(taskManagerApi.saveBugExpectations).mockImplementation(async () => snapshot(bugCase('REPRODUCING')));
     render(<Section value={snapshot({ ...bugCase('FIX_VERIFIED'), actions: ['verify-again', 'edit-expectations', 'remove'] })} />);
 
     const trigger = screen.getByRole('button', { name: 'More bug actions' });
@@ -209,11 +218,10 @@ describe('A recorded bug on the Overview', () => {
   });
 
   it('keeps focus in the list when a row goes, and states a refused save where it was asked', async () => {
-    const previewBugExpectations = vi.fn(async () => ({ versionId: 'version-1', changed: true, reproducible: true, checks: [] }));
-    const saveBugExpectations = vi.fn(async () => {
+    const previewBugExpectations = vi.mocked(taskManagerApi.previewBugExpectations).mockImplementation(async () => ({ versionId: 'version-1', changed: true, reproducible: true, checks: [] }));
+    const saveBugExpectations = vi.mocked(taskManagerApi.saveBugExpectations).mockImplementation(async () => {
       throw new Error('The expectations changed after they were shown. Review them again.');
     });
-    Object.assign(taskManagerApi, { previewBugExpectations, saveBugExpectations });
     const view = bugCase('REPRODUCED');
     view.actions = ['edit-expectations', 'remove'];
     view.version!.expectations.push({
@@ -276,7 +284,6 @@ describe('A recorded bug on the Overview', () => {
     fireEvent.click(screen.getByText('Replays'));
     const row = screen.getByRole('button', { name: 'After' }).closest('tr')!;
     expect(row.textContent).toContain('earlier expectations');
-    expect(row.querySelector('.tm-bug__state--success')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'After' }));
     const drawer = await screen.findByRole('dialog', { name: 'Replay after the fix' });

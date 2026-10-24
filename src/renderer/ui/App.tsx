@@ -222,7 +222,6 @@ function bugVerdictNotice(task: BoardTaskSummary, previous: string | undefined):
 }
 
 /** What a finished review says in a notice; a stopped review was the person's own doing. */
-
 function reviewFinishedNotice(task: BoardTaskSummary): { message: string; tone: NotificationTone } | undefined {
   const title = task.title.length > 60 ? `${task.title.slice(0, 59).trimEnd()}…` : task.title;
   switch (task.projection.agentReview.effectiveStatus) {

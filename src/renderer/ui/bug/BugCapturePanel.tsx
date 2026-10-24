@@ -127,6 +127,8 @@ export function BugCapturePanel({
   }, [taskId, sessionId, draftKey, capture.draftRevision, interrupted]);
 
   const save = useMemo(() => captureSaveState(draft, preview, capture), [draft, preview, capture]);
+  // A partial capture already says why where the page or its note is; the foot says the rest.
+  const reason = save.reason && !picking && save.reason !== capture.partial ? save.reason : undefined;
   const picks = new Map(capture.picks.map((pick) => [pick.index, pick]));
   const valueRows = preview?.valueRows ?? capture.valueRows;
   const requestRows = new Map(capture.requests.map((row) => [row.key, row]));
@@ -202,7 +204,7 @@ export function BugCapturePanel({
   ]);
 
   return (
-    <aside className="tm-bugcapture" aria-label="Mark the bug">
+    <aside className="tm-bugcapture" aria-label="Mark the bug" data-pending={saving || restarting || undefined}>
       <div className="tm-bugcapture__body">
         {/* An interrupted recording says why in the page's place; a partial one says it here. */}
         {capture.partial && !interrupted ? <p className="tm-notice" data-tone="waiting" role="note">{capture.partial}</p> : null}
@@ -268,7 +270,7 @@ export function BugCapturePanel({
 
                 {shownRules.map(({ rule, position, row }) => {
                   const request = row!;
-                  const write = request.method !== 'GET' && request.method !== 'HEAD';
+                  const write = request.write;
                   const setRule = (change: Partial<typeof rule>) => update((current) => ({
                     ...current,
                     requestRules: current.requestRules.map((item, index) => (index === position ? { ...item, ...change } : item))
@@ -336,7 +338,7 @@ export function BugCapturePanel({
 
         {recording.passwordTyped ? <p className="tm-bugcapture__note">Replays type the password you entered. It is never shown.</p> : null}
       </div>
-      <footer className="tm-bugcapture__foot" data-pending={saving || restarting || undefined}>
+      <footer className="tm-bugcapture__foot">
         {/* Its own line: beside the buttons the panel's width would leave it a few letters. */}
         {replaces ? <p className="tm-bugcapture__replaces" title={replaces}>Replaces “{replaces}”</p> : null}
         <div className="tm-bugcapture__actions">
@@ -347,7 +349,8 @@ export function BugCapturePanel({
                   <PendingLabel label="Record again" pendingLabel="Starting…" pending={Boolean(restarting)} />
                 </button>
               ) : null}
-              <button type="button" className="primary-button" disabled={saving || restarting || !save.canSaveEvidence} onClick={() => submit(false)}>
+              <button type="button" className="primary-button" disabled={saving || restarting || !save.canSaveEvidence}
+                aria-describedby={reason ? reasonId : undefined} onClick={() => submit(false)}>
                 <PendingLabel label="Save steps only" pendingLabel="Saving…" pending={busy === 'evidence'} />
               </button>
             </>
@@ -357,13 +360,13 @@ export function BugCapturePanel({
                 <PendingLabel label="Save steps only" pendingLabel="Saving…" pending={busy === 'evidence'} />
               </button>
               <button type="button" className="primary-button" disabled={saving || picking || !save.reproducible}
-                aria-describedby={save.reason ? reasonId : undefined} onClick={() => submit(true)}>
+                aria-describedby={reason ? reasonId : undefined} onClick={() => submit(true)}>
                 <PendingLabel label="Save and reproduce" pendingLabel="Saving…" pending={busy === 'save'} />
               </button>
             </>
           )}
         </div>
-        {save.reason && !interrupted && !picking ? <p id={reasonId} className="tm-bugcapture__reason">{save.reason}</p> : null}
+        {reason ? <p id={reasonId} className="tm-bugcapture__reason">{reason}</p> : null}
       </footer>
     </aside>
   );

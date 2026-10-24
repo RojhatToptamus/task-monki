@@ -8,6 +8,7 @@ import { Avatar } from './Avatar';
 import { DisclosureChevron } from './DisclosureChevron';
 import { MessageMarkdown } from './MessageMarkdown';
 import { AnswerState, RequestItemAnswer, type ItemAnswer } from './ReviewRound';
+import { PendingLabel } from './StableLabel';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 import { useClampOverflow } from './useClampOverflow';
@@ -209,7 +210,7 @@ export function ReviewDiscussionThread({ discussion, answer, location, about, fo
         </div>
       ) : null}
       {answered ? <RequestItemAnswer answer={answered} /> : null}
-      {resolveError ? <p className="form-error tm-review-thread__error" role="alert">{resolveError}</p> : null}
+      {resolveError ? <p className="tm-notice tm-review-thread__error" role="alert">{resolveError}</p> : null}
       {/* Answering is the conversation's last row, as on the platform. */}
       {reply && !discussion.resolved ? (
         <ReplyComposer reply={reply} author={author} platform={platform} resolvable={discussion.resolvable && !discussion.resolved}
@@ -283,6 +284,7 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
     <form
       ref={formRef}
       className={`tm-review-thread__reply-row${open ? ' tm-review-thread__reply-row--open' : ''}`}
+      data-pending={busy || undefined}
       onSubmit={(event) => void post(event)}
       onFocus={() => {
         setFocused(true);
@@ -325,7 +327,9 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
           <span className="tm-review-comment-composer__spacer" />
           <button type="button" className="ghost-button button--sm" disabled={busy} onClick={cancel}>Cancel</button>
           <Tooltip label={`Reply on ${platform}`} shortcut={SUBMIT_SHORTCUT}>
-            <button type="submit" className="primary-button button--sm" disabled={busy || !text.trim()}>{busy ? 'Posting…' : 'Reply'}</button>
+            <button type="submit" className="primary-button button--sm" disabled={busy || !text.trim()}>
+              <PendingLabel label="Reply" pendingLabel="Posting…" pending={busy} />
+            </button>
           </Tooltip>
         </div>
       ) : null}

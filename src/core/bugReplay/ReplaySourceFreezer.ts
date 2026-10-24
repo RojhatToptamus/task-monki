@@ -75,6 +75,12 @@ export class ReplaySourceFreezer {
       for (const file of input.envFiles) {
         const destination = path.join(prepared.sourcePath, file.relativePath);
         assertPathWithin(prepared.sourcePath, destination, 'Env file copy');
+        // The code may track the env file by now: the same content needs no copy, other content is not the bug's setup.
+        const present = await fs.lstat(destination).catch(() => undefined);
+        if (present) {
+          if (present.isFile() && (await fs.readFile(destination)).equals(file.bytes)) continue;
+          throw new Error(`${file.relativePath} is part of the code now, with other content. Record the bug again to use it`);
+        }
         await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
         await fs.writeFile(destination, file.bytes, { mode: 0o600, flag: 'wx' });
       }

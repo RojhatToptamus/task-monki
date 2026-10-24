@@ -20,7 +20,7 @@ export function BugLeaseFacts({ lease }: { lease: BugReplayLeaseRequest }) {
       {lease.commands.length ? (
         <div className="tm-buglease__commands" aria-label="Commands">
           {lease.commands.map((command) => (
-            <div key={`${command.service}:${command.command}`} className="tm-buglease__command">
+            <div key={`${command.service}:${command.directory}:${command.command}`} className="tm-buglease__command">
               <span className="tm-buglease__service">{command.service}</span>
               <code>{command.command}</code>
               {command.directory && command.directory !== '.' ? <span className="tm-buglease__directory">{command.directory}</span> : null}

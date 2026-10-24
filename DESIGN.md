@@ -880,7 +880,8 @@ copy.
 - Menus: `ActionMenu` (`ActionContextMenu` at the pointer). Badges: `Chip`.
   Comparable lists: the `tm-table` container. Modals: `ModalFrame` (the
   `tm-modal` layer and its scrim) around the panel, with
-  `useDialogFocusBoundary` on the panel.
+  `useDialogFocusBoundary` on the panel; a dialog its page must turn inert
+  behind reports itself with `useOpenReport`.
 - Leaving: every floating layer its owner renders conditionally sits in a
   `Presence`, which keeps it on screen while it leaves (§12); a layer that
   stays mounted and hides takes `useExit`.

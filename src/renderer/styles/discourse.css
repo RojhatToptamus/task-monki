@@ -437,7 +437,7 @@
   background-color: var(--card-hover);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-discourse-new-responses:focus {
+:root[data-input-modality='keyboard'] .tm-discourse-new-responses:focus {
   box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop), var(--focus-halo);
 }
 
@@ -733,12 +733,12 @@
   color: var(--text);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-discourse-agent-config .tm-agent-console__reasoning-options button:focus {
+:root[data-input-modality='keyboard'] .tm-discourse-agent-config .tm-agent-console__reasoning-options button:focus {
   border-radius: var(--r-xs);
   box-shadow: var(--focus-halo);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-discourse-agent-config .tm-agent-console__reasoning-options button.is-selected:focus {
+:root[data-input-modality='keyboard'] .tm-discourse-agent-config .tm-agent-console__reasoning-options button.is-selected:focus {
   box-shadow: inset 0 0 0 1px var(--edge-raised), var(--focus-halo);
 }
 
@@ -864,7 +864,7 @@
   background-color: var(--hover);
 }
 
-.app-shell[data-input-modality='keyboard'] .discourse-mention-input__option[aria-selected='true'] {
+:root[data-input-modality='keyboard'] .discourse-mention-input__option[aria-selected='true'] {
   background-color: var(--sel);
   box-shadow: var(--focus-halo-inset);
 }

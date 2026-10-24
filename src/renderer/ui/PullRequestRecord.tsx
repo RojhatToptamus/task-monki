@@ -120,7 +120,7 @@ export function PullRequestRecord({
         <dl className="tm-props">
         {view.reviewers.length > 0 ? (
           <PropRow label="Reviews" value={<>
-            <ul className="tm-prrecord__people">
+            <ul className="tm-prrecord__people" data-pending={asking ? true : undefined}>
               {view.reviewers.map((reviewer) => (
                 <li key={reviewer.name}>
                   <span className="tm-prrecord__person">{reviewer.name}</span>
@@ -137,7 +137,7 @@ export function PullRequestRecord({
                 </li>
               ))}
             </ul>
-            {askError ? <p className="form-error" role="alert">{askError}</p> : null}
+            {askError ? <p className="tm-notice" role="alert">{askError}</p> : null}
           </>} />
         ) : view.review ? (
           <PropRow label="Review" value={<span className="tm-prrecord__word" data-tone={view.review.tone}>{view.review.word}</span>} />

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bugCountsLine, bugReason, bugScopeLine, bugStateWord, serviceStoppedSentence, suggestBugTitle } from './bugReplayClaims';
+import { bugCountsLine, bugReason, bugScopeLine, bugStateWord, suggestBugTitle } from './bugReplayClaims';
 
 describe('What Task Monki says about a bug', () => {
   it('counts only runs that reached a result', () => {
@@ -24,12 +24,6 @@ describe('What Task Monki says about a bug', () => {
     expect(bugStateWord({ state: 'VERIFYING', activeRun: { waitingFor: 'APPROVAL' } })).toMatchObject({ word: 'Replays need approval', owed: true });
     expect(bugStateWord({ state: 'REPRODUCED', handoff: { status: 'RUNNING' } })).toMatchObject({ word: 'Fixing the bug', owed: false });
     expect(bugStateWord({ state: 'STILL_FAILING' })).toMatchObject({ word: 'Bug still failing', tone: 'error', owed: true });
-  });
-
-  it('names the service that stopped, or the app when none is named', () => {
-    expect(serviceStoppedSentence('web')).toBe('The web service stopped');
-    expect(serviceStoppedSentence('the app')).toBe('The app stopped');
-    expect(serviceStoppedSentence(undefined)).toBe('The app stopped');
   });
 
   it('always says what the check did not read', () => {

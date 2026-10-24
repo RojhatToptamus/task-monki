@@ -80,7 +80,6 @@ export class RecorderSession {
   private readonly requests = new Map<string, PendingRequest>();
   private readonly finished: BugRecordingRequest[] = [];
   private readonly consoleEntries: BugRecordingConsoleEntry[] = [];
-  private readonly blockedHosts = new Map<string, number>();
   private readonly coverageReasons: string[] = [];
   private readonly bodyRequests: string[] = [];
   private readonly originRoles = new Map<string, string>();
@@ -107,7 +106,6 @@ export class RecorderSession {
   private dialogType: 'alert' | 'confirm' | 'prompt' | 'beforeunload' = 'confirm';
   private bytes = 0;
   private closed = false;
-  /** The page's scroll when the capture's screenshot was taken; picks are placed against it. */
   /** The window's scroll when the capture's screenshot was taken; unknown, picks are not placed. */
   private shotScroll?: { x: number; y: number };
 
@@ -158,7 +156,6 @@ export class RecorderSession {
     });
   }
 
-  /** The action that opens the start page: the clean start every case begins with. */
   /**
    * The start page, timed from when its load began (`t`, by default now), so what the page did
    * while it loaded belongs to the start step, as it does when a replay opens it.
@@ -204,10 +201,6 @@ export class RecorderSession {
   markIncomplete(reason: string): void {
     this.complete = false;
     this.noteCoverage(reason);
-  }
-
-  noteBlocked(host: string): void {
-    this.blockedHosts.set(host, (this.blockedHosts.get(host) ?? 0) + 1);
   }
 
   get title(): string {
@@ -381,8 +374,7 @@ export class RecorderSession {
       console: this.consoleEntries.slice(-BUG_RECORDING_LIMITS.console),
       coverage: {
         complete: this.complete,
-        reasons: [...this.coverageReasons],
-        blockedHosts: [...this.blockedHosts.entries()].map(([host, count]) => ({ host, count })).slice(0, 64)
+        reasons: [...this.coverageReasons]
       }
     };
     if (mark) log.mark = { ...mark, picks: mark.picks.map((pick) => ({ ...pick })) };
@@ -765,21 +757,29 @@ export class RecorderSession {
     pending.entry.durationMs = Date.now() - pending.startedAt;
     this.finished.push(pending.entry);
     if ((pending.entry.status ?? 0) >= 400) this.notify({ kind: 'timeline' });
+    if (pending.json || pending.entry.requestJson !== undefined) this.keepBodies(requestId);
     if (pending.json) {
-      this.bodyRequests.push(requestId);
-      if (this.bodyRequests.length > BODY_RING) {
-        const dropped = this.bodyRequests.shift();
-        const old = this.finished.find((request) => request.id === dropped);
-        if (old) delete old.responseJson;
-      }
       void this.cdp.send('Network.getResponseBody', { requestId }).then((body) => {
         const result = body as { body?: string; base64Encoded?: boolean };
-        if (!result.body || result.base64Encoded || result.body.length > BUG_RECORDING_LIMITS.bodyBytes) return;
+        // A body that arrives after its request left the ring is not kept either.
+        if (!result.body || result.base64Encoded || result.body.length > BUG_RECORDING_LIMITS.bodyBytes || !this.bodyRequests.includes(requestId)) return;
         const parsed = parseJson(result.body);
         if (parsed !== undefined) pending.entry.responseJson = parsed;
       }, () => undefined);
     }
     this.trim();
+  }
+
+  /** Request and response bodies stay for the newest requests only, so memory stays bounded. */
+  private keepBodies(requestId: string): void {
+    this.bodyRequests.push(requestId);
+    if (this.bodyRequests.length <= BODY_RING) return;
+    const dropped = this.bodyRequests.shift();
+    const old = this.finished.find((request) => request.id === dropped);
+    if (old) {
+      delete old.requestJson;
+      delete old.responseJson;
+    }
   }
 
   private onFailed(params: Record<string, unknown>): void {
@@ -790,8 +790,8 @@ export class RecorderSession {
     const blocked = typeof params.blockedReason === 'string' || String(params.errorText ?? '').includes('BLOCKED_BY_CLIENT');
     pending.entry.outcome = blocked ? 'blocked' : pending.entry.status !== undefined ? 'response' : 'failed';
     pending.entry.durationMs = Date.now() - pending.startedAt;
-    if (blocked && pending.entry.host) this.noteBlocked(pending.entry.host);
     this.finished.push(pending.entry);
+    if (pending.entry.requestJson !== undefined) this.keepBodies(requestId);
     this.trim();
     this.notify({ kind: 'timeline' });
   }

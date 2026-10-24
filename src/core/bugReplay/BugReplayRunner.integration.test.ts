@@ -40,7 +40,7 @@ function couponRecording(): BugRecordingLogV1 {
       { id: 'r1', t: 4_020, method: 'POST', role: 'primary', path: '/api/coupons/apply', queryKeys: [], resourceType: 'fetch', outcome: 'response', status: 200, fromServiceWorker: false, actionIndex: 4 }
     ],
     console: [],
-    coverage: { complete: true, reasons: [], blockedHosts: [] },
+    coverage: { complete: true, reasons: [] },
     mark: {
       t: 5_000,
       actionIndex: 4,
@@ -123,10 +123,16 @@ describe.skipIf(!existsSync(browser))('Replay runner with a real browser', () =>
 
     // The fix the agent would make: the discount is applied once.
     const source = path.join(app, 'public', 'app.js');
-    await fs.writeFile(source, (await fs.readFile(source, 'utf8')).replace('state.discount * 2', 'state.discount'));
+    const original = await fs.readFile(source, 'utf8');
+    try {
+      await fs.writeFile(source, original.replace('state.discount * 2', 'state.discount'));
 
-    const after = await replay('CANDIDATE');
-    expect(after.verdict).toMatchObject({ outcome: 'PASSED', observations: [{ passed: true, observed: 'Cart total showed "$45.00"' }] });
+      const after = await replay('CANDIDATE');
+      expect(after.verdict).toMatchObject({ outcome: 'PASSED', observations: [{ passed: true, observed: 'Cart total showed "$45.00"' }] });
+    } finally {
+      // The app copy is shared by every test here: the next one starts from the buggy code.
+      await fs.writeFile(source, original);
+    }
   }, 120_000);
 
   it('counts page errors from the marked step on, so an error the page raised while it loaded is never the bug', async () => {

@@ -210,11 +210,11 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
 }
 
 .tm-panel-resize:hover::before,
-.app-shell[data-input-modality='keyboard'] .tm-panel-resize:focus::before {
+:root[data-input-modality='keyboard'] .tm-panel-resize:focus::before {
   background: var(--edge);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-panel-resize:focus span {
+:root[data-input-modality='keyboard'] .tm-panel-resize:focus span {
   background: var(--accent);
 }
 
@@ -287,7 +287,6 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   color: var(--text);
 }
 
-/* A list filter spans its column; each option takes an equal share. */
 /* In a head or a bar the track is as tall as the controls beside it (DESIGN.md 3): 24px
    segments with 12px labels in a 28px track. */
 .segmented--compact .segmented__btn {
@@ -295,6 +294,7 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   font-size: var(--t-help);
 }
 
+/* A list filter spans its column; each option takes an equal share. */
 .segmented--fill {
   display: flex;
 }
@@ -360,12 +360,12 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
   background-color: var(--text-disabled);
 }
 
-.app-shell[data-input-modality='keyboard'] input[type='checkbox']:not(.tm-visually-hidden):focus-visible {
+:root[data-input-modality='keyboard'] input[type='checkbox']:not(.tm-visually-hidden):focus-visible {
   outline: 0;
   box-shadow: inset 0 0 0 1px var(--control-edge), 0 0 0 3px var(--focus-ring);
 }
 
-.app-shell[data-input-modality='keyboard'] input[type='checkbox']:not(.tm-visually-hidden):checked:focus-visible {
+:root[data-input-modality='keyboard'] input[type='checkbox']:not(.tm-visually-hidden):checked:focus-visible {
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
@@ -870,7 +870,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
   background: var(--field-focus);
   box-shadow: inset 0 0 0 1px var(--field-edge-focus);
 }
-.app-shell[data-input-modality='keyboard'] .interaction-question textarea.interaction-question__input:focus {
+:root[data-input-modality='keyboard'] .interaction-question textarea.interaction-question__input:focus {
   box-shadow: inset 0 0 0 1px var(--field-edge-focus), 0 0 0 3px var(--focus-ring);
 }
 .interaction-question textarea.interaction-question__input:disabled { background: var(--field-disabled); color: var(--text-disabled); }
@@ -928,7 +928,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
   box-shadow: inset 0 0 0 1px var(--field-edge-focus);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-composer:has(textarea:focus) {
+:root[data-input-modality='keyboard'] .tm-composer:has(textarea:focus) {
   box-shadow:
     inset 0 0 0 1px var(--field-edge-focus),
     0 0 0 3px var(--focus-ring);
@@ -966,7 +966,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger[aria-expanded='true'] { background: var(--hover); box-shadow: none; color: var(--text-soft); }
 /* Size containment would collapse the chip to nothing inside a flex toolbar. */
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger:focus { background: var(--hover); box-shadow: none; }
-.app-shell[data-input-modality='keyboard'] :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger:focus { box-shadow: 0 0 0 2px var(--focus-ring); }
+:root[data-input-modality='keyboard'] :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger:focus { box-shadow: 0 0 0 2px var(--focus-ring); }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact { display: inline-flex; flex: 0 1 auto; gap: 2px; min-width: 0; container-type: normal; }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__row { display: flex; min-width: 0; }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__summary { font-size: var(--t-help); font-weight: var(--w-regular); }
@@ -1078,10 +1078,12 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .tm-stable-label > * { grid-area: 1 / 1; }
 .tm-stable-label__reserve { visibility: hidden; }
 /* A pending label replaces the resting one only once the action has run for
-   --pending-delay (DESIGN.md 6.1); an action that ends sooner never shows it. */
-.tm-pending-label > :last-child { visibility: hidden; }
-.tm-pending-label[data-pending] > :first-child { visibility: hidden; transition: visibility 0s linear var(--pending-delay); }
-.tm-pending-label[data-pending] > :last-child { visibility: visible; transition: visibility 0s linear var(--pending-delay); }
+   --pending-delay (DESIGN.md 6.1); an action that ends sooner never shows it. Opacity, not
+   visibility, hides the waiting label: text hidden by visibility leaves the accessible name,
+   so the control would have none until the delay ends. aria-hidden picks the label heard. */
+.tm-pending-label > :last-child { opacity: 0; }
+.tm-pending-label[data-pending] > :first-child { opacity: 0; transition: opacity 0s linear var(--pending-delay); }
+.tm-pending-label[data-pending] > :last-child { opacity: 1; transition: opacity 0s linear var(--pending-delay); }
 
 /* The inline notice (DESIGN.md 10): the one way a surface states a warning or an error about
    itself or its action. The tone's tint and ink carry the whole unit, its glyph, title and a

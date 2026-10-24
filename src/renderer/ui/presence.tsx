@@ -45,6 +45,19 @@ export function useLeaving(): boolean {
   return useContext(PresenceContext).leaving;
 }
 
+/**
+ * Tells the page a dialog is open, from its first paint until it starts to leave or unmounts, so
+ * what is behind it turns inert at once and takes its keys back as soon as the dialog leaves.
+ */
+export function useOpenReport(onOpenChange: ((open: boolean) => void) | undefined): void {
+  const leaving = useLeaving();
+  useLayoutEffect(() => {
+    if (leaving || !onOpenChange) return undefined;
+    onOpenChange(true);
+    return () => onOpenChange(false);
+  }, [leaving, onOpenChange]);
+}
+
 /** The props for a layer's root element, to spread onto it. Outside a `Presence` the layer is simply open. */
 export function useLayerProps(): LayerProps {
   return useContext(PresenceContext).layer;

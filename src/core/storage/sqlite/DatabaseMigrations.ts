@@ -1661,6 +1661,13 @@ CREATE TABLE IF NOT EXISTS bug_replay_approvals (
   created_at TEXT NOT NULL,
   UNIQUE (repository_id, approval_digest)
 ) STRICT;
+
+-- The child columns deleting a task's bug looks up. They are here rather than beside their
+-- tables so a profile a development build numbered 15 gets them too.
+CREATE INDEX IF NOT EXISTS bug_case_versions_task_idx ON bug_case_versions(task_id);
+CREATE INDEX IF NOT EXISTS bug_case_decisions_task_idx ON bug_case_decisions(task_id);
+CREATE INDEX IF NOT EXISTS bug_case_decisions_version_idx ON bug_case_decisions(version_id) WHERE version_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS bug_replay_runs_version_idx ON bug_replay_runs(version_id) WHERE version_id IS NOT NULL;
 `
   }
 ] as const;

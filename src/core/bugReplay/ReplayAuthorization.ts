@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { parsePreviewSpec, type AuthorizationRequest, type PreviewRuntime, type PreviewSpec } from 'previewhost';
-import { REPLAY_NAME_PATTERN } from './ReplayDerivation';
+import { collectSecretIds, REPLAY_NAME_PATTERN } from './ReplayDerivation';
 
 /**
  * Who may start clean copies. The person approves the replays of one recipe for a task, as
@@ -59,10 +59,6 @@ export class ReplayAuthorization {
     return (this.leases.get(taskId)?.size ?? 0) > 0;
   }
 
-  revoke(taskId: string): void {
-    this.leases.delete(taskId);
-  }
-
   /** A kept approval was revoked: every lease it stood for ends now, not when Task Monki quits. */
   revokeKept(keptId: string): void {
     this.revokedKept.add(keptId);
@@ -116,7 +112,7 @@ export class ReplayAuthorization {
           return false;
         }
         if (!isDeepStrictEqual(request.spec, parsed)) return false;
-        const references = secretIdsOf(request.spec);
+        const references = [...collectSecretIds(request.spec)];
         if (references.some((id) => !expected.secretIds.includes(id))) return false;
         const lease = this.leases.get(expected.taskId)?.get(expected.approvalDigest);
         if (!lease || (!lease.keptId && lease.startsLeft < 1)) return false;
@@ -153,19 +149,4 @@ function requestName(request: AuthorizationRequest): string | undefined {
     default:
       return undefined;
   }
-}
-
-function secretIdsOf(value: unknown, found: string[] = []): string[] {
-  if (!value || typeof value !== 'object') return found;
-  if (Array.isArray(value)) {
-    for (const item of value) secretIdsOf(item, found);
-    return found;
-  }
-  const record = value as Record<string, unknown>;
-  if (typeof record.secret === 'string' && Object.keys(record).length === 1) {
-    if (!found.includes(record.secret)) found.push(record.secret);
-    return found;
-  }
-  for (const item of Object.values(record)) secretIdsOf(item, found);
-  return found;
 }

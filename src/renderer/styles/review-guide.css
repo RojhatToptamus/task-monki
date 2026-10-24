@@ -53,7 +53,7 @@
    there, they stay chosen on the gutter until the next move. */
 .tm-review-guide__term { border-radius: var(--r-2xs); text-decoration: underline dotted var(--faint); text-decoration-thickness: 1px; text-underline-offset: 3px; outline: none; transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out); }
 .tm-review-guide__term:hover { background-color: var(--hover); box-shadow: 0 0 0 2px var(--hover); text-decoration-color: var(--muted); }
-.app-shell[data-input-modality='keyboard'] .tm-review-guide__term:focus { box-shadow: var(--focus-halo); }
+:root[data-input-modality='keyboard'] .tm-review-guide__term:focus { box-shadow: var(--focus-halo); }
 .tm-review-guide .tm-diffline { transition: box-shadow var(--motion-fast) var(--ease-out); }
 .tm-review-guide .tm-diffline[data-lit] { box-shadow: inset 0 0 0 999px var(--hover); }
 .tm-review-guide .tm-diffline[data-marked] .tm-diffline__num { background-color: var(--sel); color: var(--accent-ink); }

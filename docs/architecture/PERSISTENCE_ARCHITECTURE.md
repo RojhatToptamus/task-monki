@@ -292,7 +292,8 @@ Versions are insert-only; a version's payload keeps what the recording showed
 for each check (`recorded`), which a changed expectation is judged against.
 Versions saved before it was kept have none, and their expectations cannot be
 changed.
-Evidence bytes are managed files with per-kind limits and 256 MB in all; their
+Evidence bytes are managed files with per-kind limits, and a new recording waits
+while 256 MB is stored in all; their
 rows and managed-file records are deleted in one transaction and the bytes are
 collected after commit. Deleting a task removes its Bug Replay rows inside the
 task deletion transaction through a deletion participant. Bytes published for a

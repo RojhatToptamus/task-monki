@@ -97,8 +97,6 @@ export interface BugCaseVersionRecord {
   sharedSetup: string[];
   envFiles: BugReplayEnvFileRecord[];
   baselineTreeId: string;
-  /** Runner bundle, browser and playwright-core identity; verdicts compare only within one toolchain. */
-  toolchain: string;
   createdAt: string;
 }
 
@@ -126,7 +124,7 @@ export interface BugReplayKeptApprovalRecord {
   keptAt: string;
 }
 
-export type BugReplayFileKind ='ACTION_LOG' | 'NETWORK_LOG' | 'CONSOLE_LOG' | 'SCREENSHOT' | 'RUN_FRAMES' | 'SERVICE_LOG';
+export type BugReplayFileKind = 'ACTION_LOG' | 'NETWORK_LOG' | 'CONSOLE_LOG' | 'SCREENSHOT' | 'RUN_FRAMES';
 
 export interface BugReplayFileRecord {
   id: string;
@@ -150,14 +148,9 @@ export interface StoredBugReplayRun extends BugReplayRunRecord {
   signatureObserved?: Record<string, string>;
   /** Tracked files of the frozen copy that changed between the export and readiness. */
   setupChangedPaths?: string[];
+  /** What the run's verdict holds under (`replayTerms`); verdicts compare only within the same terms. */
   toolchain?: string;
   cleanupDebt?: string;
   /** Set on a verification attempt's candidates when its qualification is old: two passes add a control run. */
   controlDue?: boolean;
-}
-
-export const TERMINAL_RUN_STATES = new Set(['SETTLED']);
-
-export function isTerminalRun(run: Pick<BugReplayRunRecord, 'state'>): boolean {
-  return run.state === 'SETTLED';
 }

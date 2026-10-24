@@ -1100,7 +1100,7 @@ describe('Recorded bug', () => {
     }
   };
 
-  it('asks before removing the bug, and the page stays inert while it asks', async () => {
+  it('asks before removing the bug, and tells the page a dialog is open while it asks', async () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     vi.mocked(taskManagerApi.getBugReplay).mockResolvedValueOnce(reproduced).mockResolvedValue(reproduced);
     onTestFinished(() => {

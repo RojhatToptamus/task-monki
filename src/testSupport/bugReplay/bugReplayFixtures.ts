@@ -64,7 +64,7 @@ export function checkoutRecording(overrides: { picks?: BugRecordingPick[]; respo
       }
     ],
     console: [],
-    coverage: { complete: true, reasons: [], blockedHosts: [] },
+    coverage: { complete: true, reasons: [] },
     mark: {
       t: 2500,
       actionIndex: 2,
@@ -210,7 +210,6 @@ export function versionRecord(overrides: Partial<BugCaseVersionRecord> = {}): Bu
     sharedSetup: [],
     envFiles: [],
     baselineTreeId: 'tree-recorded',
-    toolchain: TOOLCHAIN,
     createdAt: at(0),
     ...overrides
   };

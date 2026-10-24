@@ -1,10 +1,8 @@
 import {
-  BugCaseValidationError,
   canonicalJson,
   describeBugCaseAssertion,
   describeTarget,
   isDomAssertion,
-  validateBugCaseStructure,
   type BugCaseAssertion,
   type BugCaseSignatureEntry,
   type BugCaseV1
@@ -18,9 +16,11 @@ import type {
 import { suggestBugTitle, type BugTitleSeed } from '../../shared/bugReplayClaims';
 import {
   answerHolds,
+  caseRefusal,
   checkViews,
   elementAssertion,
   elementSignature,
+  isWriteMethod,
   statusSignature,
   valueSignature
 } from './BugCaseCompiler';
@@ -112,11 +112,8 @@ export function reviseBugCase(base: RevisableVersion, edits: BugExpectationEdit[
     return refuse(`The value expectations on ${requestLabel(before, assertion.requestId)} need its status`);
   }
   if (signature.length === 0) return refuse(matches ?? 'No expectation failed in the recording');
-  try {
-    validateBugCaseStructure(document);
-  } catch (error) {
-    return refuse((error instanceof BugCaseValidationError ? error.reason : 'These expectations cannot be reproduced.').replace(/\.$/, ''));
-  }
+  const refused = caseRefusal(document);
+  if (refused) return refuse(refused);
   return { document, recorded: kept, checks: checkViews(document), changed: true, reproducible: true };
 }
 
@@ -245,7 +242,7 @@ export function expectationViews(document: BugCaseV1, recorded: Record<string, B
     const key = `${assertion.method} ${assertion.origin} ${assertion.pathTemplate}?${assertion.queryKeys.join('&')}`;
     let row = requests.get(key);
     if (!row) {
-      row = { kind: 'request', name: `${assertion.method} ${assertion.pathTemplate}`, failed: false, write: !['GET', 'HEAD', 'OPTIONS'].includes(assertion.method), valueIds: [] };
+      row = { kind: 'request', name: `${assertion.method} ${assertion.pathTemplate}`, failed: false, write: isWriteMethod(assertion.method), valueIds: [] };
       requests.set(key, row);
       rows.push(row);
     }

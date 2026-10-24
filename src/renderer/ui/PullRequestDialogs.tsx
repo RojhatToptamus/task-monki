@@ -8,7 +8,9 @@ import type {
 import type { ReplyDraft } from '../model/pullRequestFeedback';
 import { REVIEW_OUTCOME_LABELS } from '../model/reviewRounds';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { ModalFrame } from './ModalFrame';
 import { AnswerQuote } from './ReviewRound';
+import { PendingLabel } from './StableLabel';
 import { StatusGlyph } from './StatusBadge';
 
 /** A method's segment and the verb its merge button says, in the platform's words. */
@@ -97,8 +99,7 @@ export function MergePullRequestModal({
   };
 
   return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="merge-pr-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame labelledBy="merge-pr-title" pending={busy} onDismiss={onCancel}>
       <form ref={panelRef} className="tm-modal__panel tm-merge-modal" tabIndex={-1} onSubmit={(event) => void submit(event)}>
         <h3 id="merge-pr-title">Merge {noun}</h3>
         <p className="tm-merge-modal__branches">
@@ -123,15 +124,15 @@ export function MergePullRequestModal({
             <span>Delete <code>{options.head}</code></span>
           </label>
         ) : null}
-        {error ? <p className="form-error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-notice tm-modal__notice" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>Cancel</button>
           <button type="submit" className="primary-button" disabled={busy || !method}>
-            {busy ? 'Merging…' : method ? words[method].action : 'Merge'}
+            <PendingLabel label={method ? words[method].action : 'Merge'} pendingLabel="Merging…" pending={busy} />
           </button>
         </div>
       </form>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -220,8 +221,7 @@ export function ReplyToReviewersModal({
     : `Post ${count} ${count === 1 ? 'reply' : 'replies'}`;
 
   return (
-    <div className="tm-modal tm-modal--top" role="dialog" aria-modal="true" aria-labelledby="reply-pr-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame className="tm-modal--top" labelledBy="reply-pr-title" pending={busy} onDismiss={onCancel}>
       <form ref={panelRef} className="tm-modal__panel tm-reply-modal" tabIndex={-1} onSubmit={(event) => void submit(event)}>
         <h3 id="reply-pr-title">Reply on {platform}</h3>
         <div className="tm-reply-modal__list">
@@ -287,20 +287,20 @@ export function ReplyToReviewersModal({
           </div>
         ) : null}
         {failed.filter((failure) => failure.reviewer).map((failure) => (
-          <p key={failure.reviewer} className="form-error" role="alert">{failure.error}</p>
+          <p key={failure.reviewer} className="tm-notice tm-modal__notice" role="alert">{failure.error}</p>
         ))}
-        {error ? <p className="form-error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-notice tm-modal__notice" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>{posted.size > 0 ? 'Close' : 'Cancel'}</button>
           {done ? null : (
             <button type="submit" className="primary-button" disabled={busy || Boolean(reason)}
               aria-describedby={reason ? 'reply-pr-reason' : undefined}>
-              {busy ? 'Posting…' : label}
+              <PendingLabel label={label} pendingLabel="Posting…" pending={busy} />
             </button>
           )}
         </div>
         {reason ? <p id="reply-pr-reason" className="tm-slot__reason">{reason}</p> : null}
       </form>
-    </div>
+    </ModalFrame>
   );
 }

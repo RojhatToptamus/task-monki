@@ -536,8 +536,8 @@
   text-align: left;
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-card__hit:focus,
-.app-shell[data-input-modality='keyboard'] .tm-taskmenu__trigger:focus {
+:root[data-input-modality='keyboard'] .tm-card__hit:focus,
+:root[data-input-modality='keyboard'] .tm-taskmenu__trigger:focus {
   outline: 0;
   box-shadow: var(--focus-halo);
 }
@@ -783,7 +783,7 @@
 }
 
 /* A row inside the scrolling list: the halo is drawn inward so it is never cut. */
-.app-shell[data-input-modality='keyboard'] .tm-inbox-row__hit:focus {
+:root[data-input-modality='keyboard'] .tm-inbox-row__hit:focus {
   outline: 0;
   box-shadow: var(--focus-halo-inset);
 }
@@ -1422,7 +1422,7 @@
 
 /* The keyboard row, as in ActionMenu: the selected fill and the halo drawn
    inward, so the scrolling menu never cuts it. */
-.app-shell[data-input-modality='keyboard'] .tm-theme-picker__option:focus {
+:root[data-input-modality='keyboard'] .tm-theme-picker__option:focus {
   background-color: var(--sel);
   outline: 0;
   box-shadow: var(--focus-halo-inset);
@@ -1847,7 +1847,7 @@
   box-shadow: inset 0 0 0 1px var(--blocked);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-agent-console__trigger--error:focus {
+:root[data-input-modality='keyboard'] .tm-agent-console__trigger--error:focus {
   box-shadow: inset 0 0 0 1px var(--blocked), var(--focus-halo);
 }
 
@@ -2042,7 +2042,7 @@
 
 /* The keyboard row, as in ActionMenu: the selected fill and the halo drawn
    inward, so the scrolling list never cuts it. */
-.app-shell[data-input-modality='keyboard'] .tm-agent-console__option.is-active {
+:root[data-input-modality='keyboard'] .tm-agent-console__option.is-active {
   background-color: var(--sel);
   box-shadow: var(--focus-halo-inset);
 }

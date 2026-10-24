@@ -62,7 +62,7 @@ function recording(): BugRecordingLogV1 {
       { id: 'r2', t: 1520, method: 'POST', role: 'primary', path: '/api/coupons/apply', queryKeys: [], resourceType: 'fetch', outcome: 'response', status: 200, fromServiceWorker: false, actionIndex: 2 }
     ],
     console: [],
-    coverage: { complete: true, reasons: [], blockedHosts: [] },
+    coverage: { complete: true, reasons: [] },
     mark: {
       t: 2500,
       actionIndex: 2,
@@ -149,7 +149,6 @@ export async function seedRecordedBug(input: SeedBugInput): Promise<BugReplayGat
     sharedSetup: [],
     envFiles,
     baselineTreeId: recordedTree,
-    toolchain: SEED_TOOLCHAIN,
     createdAt: at(0)
   };
   const decisions: BugCaseDecisionRecord[] = version
@@ -248,14 +247,14 @@ export async function seedRecordedBug(input: SeedBugInput): Promise<BugReplayGat
       store.recordFile(tx, earlier.file);
     }
     store.insertCapture(tx, capture);
-    store.insertCase(tx, { ...bugCase, ...(observedTreeId ? { observedTreeId } : {}) });
+    const observed = { ...bugCase, ...(observedTreeId ? { observedTreeId } : {}) };
+    store.insertCase(tx, observed);
     if (version) store.insertVersion(tx, version);
     for (const decision of decisions) store.insertDecision(tx, decision);
     for (const record of runs) store.insertRun(tx, record);
     store.recordFile(tx, screenshot);
     return computeGate({
-      bugCase,
-      state: observedTreeId ? { observedTreeId } : {},
+      bugCase: observed,
       versions: version ? [version] : [],
       decisions,
       runs: [...runs].sort((left, right) => right.queuedAt.localeCompare(left.queuedAt)),

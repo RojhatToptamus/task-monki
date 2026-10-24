@@ -91,6 +91,22 @@ describe('Bug Replay store', () => {
     await expect(store.readFile(files[0])).rejects.toThrow();
   });
 
+  it('refuses a decision or file whose payload disagrees with its row, so it never picks a version or bytes to delete', async () => {
+    const profile = await openProfile();
+    const { capture, bugCase, files } = await seedBug(profile);
+    const { store } = profile;
+    // The screenshot's payload now names the run log's bytes, and the decision another version.
+    await store.write((tx) => {
+      tx.run(`UPDATE bug_replay_files SET payload_json = json_set(payload_json, '$.storageKey', ?) WHERE id = ?`, [files[1].storageKey, files[0].id]);
+      tx.run(`UPDATE bug_case_decisions SET payload_json = json_set(payload_json, '$.versionId', 'another-version') WHERE id = 'decision-1'`);
+    });
+
+    await expect(store.read((reader) => store.listDecisions(reader, bugCase.id))).rejects.toThrow('integrity check');
+    await expect(store.read((reader) => store.filesFor(reader, 'CAPTURE', capture.id))).rejects.toThrow('integrity check');
+    await expect(store.write((tx) => store.deleteForTask(tx, profile.task.id))).rejects.toThrow('integrity check');
+    expect(await store.readFile(files[1])).toHaveLength(2);
+  });
+
   it('removes bytes published for a write that did not commit', async () => {
     const profile = await openProfile();
     const { store, task, persistence } = profile;

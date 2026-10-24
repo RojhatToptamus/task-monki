@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BugCaptureView, BugRecordingSessionView } from '../../../shared/bugReplay';
 import { taskManagerApi } from '../../api/taskManagerClient';
 import { BugRecordingWorkspace } from './BugRecordingWorkspace';
@@ -39,6 +39,10 @@ function workspace(view: BugRecordingSessionView) {
 }
 
 describe('Recording a bug', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('proposes the ignored env files Task Monki found once they arrive, and sends that choice', async () => {
     // The workspace opens while the copy is checked; the files are found afterwards.
     const view = render(workspace(recording({})));
@@ -136,7 +140,6 @@ describe('Recording a bug', () => {
     const keep = screen.getByRole('button', { name: 'Save steps only' });
     // Recording again comes first; keeping the steps is the primary choice, last.
     expect(again.compareDocumentPosition(keep) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(keep.className).toContain('primary-button');
     fireEvent.click(again);
     expect(taskManagerApi.startBugRecording).toHaveBeenCalledTimes(1);
   });

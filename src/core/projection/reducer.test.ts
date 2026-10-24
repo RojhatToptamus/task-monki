@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { BugReplayGateProjection } from '../../shared/bugReplay';
 import { createInitialProjection } from '../../shared/contracts';
 import type { DomainEvent, RunRecord, Task } from '../../shared/contracts';
 import { applyEventToState, createEmptyState, reduceProjection, reduceRun } from './reducer';
@@ -68,6 +69,32 @@ describe('projection reducer', () => {
     expect(next.tasks[0]).toEqual(task);
     expect(next.events).toHaveLength(1);
   });
+
+  it.each(['BUG_CAPTURED', 'BUG_CASE_DECIDED', 'BUG_HANDOFF_CHANGED', 'BUG_REPLAY_RUN_UPDATED', 'BUG_REPLAY_RUN_SETTLED', 'BUG_REPLAY_VERDICT_STALE'] as const)(
+    'lets %s set and clear the recorded bug without moving the phase, the current run or the review', (type) => {
+      const run = createRun({ mode: 'IMPLEMENTATION', status: 'RUNNING' });
+      const task = createTask({ workflowPhase: 'IN_PROGRESS', currentRunId: run.id });
+      task.projection.agentReview = { status: 'PASSED', runId: 'review-1', finalArtifactId: 'final-1', summary: 'Current review.' };
+      const gate: BugReplayGateProjection = {
+        caseId: 'case-1', title: 'Coupon total is wrong', state: 'FIX_VERIFIED', verdictTreeId: 'tree-1', candidate: { passed: 2, total: 2 }, updatedAt: now
+      };
+      const bugEvent = (payload: unknown): DomainEvent => ({ ...createEvent(type, payload), runId: undefined, source: 'replay' });
+      const unchanged = (next: ReturnType<typeof applyEventToState>) => {
+        expect(next.tasks[0]).toMatchObject({ workflowPhase: task.workflowPhase, currentRunId: task.currentRunId });
+        expect(next.tasks[0].projection.agentReview).toEqual(task.projection.agentReview);
+        expect(next.runs).toEqual([run]);
+      };
+
+      const recorded = applyEventToState({ ...createEmptyState(), tasks: [task], runs: [run] }, bugEvent({ gate }));
+      unchanged(recorded);
+      expect(recorded.tasks[0].projection.bugReplay).toEqual(gate);
+
+      // A bug that is no longer active leaves no gate behind.
+      const removed = applyEventToState(recorded, bugEvent({ gate: null }));
+      unchanged(removed);
+      expect(removed.tasks[0].projection).not.toHaveProperty('bugReplay');
+    }
+  );
 
   it('keeps a Preview conversation out of the task run projection and workflow phase', () => {
     const task = createTask();

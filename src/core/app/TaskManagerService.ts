@@ -3329,7 +3329,7 @@ export class TaskManagerService {
     const sessionId = randomUUID();
     const record = await this.addInstruction(randomUUID(), turn.task,
       { id: runId, iterationId: turn.iteration.id, worktreeId: turn.worktree.id, sessionId, requestedSettings: turn.settings },
-      text, 'FOLLOW_UP', 'SENDING', undefined, undefined, reviewRequest, runId);
+      text, 'FOLLOW_UP', 'SENDING', { reviewRequest, reservedRunId: runId });
     let run: RunRecord;
     try {
       run = await this.agents.startTurn({ ...turn, runId, createSessionId: sessionId });
@@ -3440,7 +3440,7 @@ export class TaskManagerService {
     if (run.status !== 'RUNNING') {
       throw new Error('The run changed. Review the current action before sending.');
     }
-    const instruction = await this.addInstruction(input.id, task, run, input.instruction, 'QUEUE', 'QUEUED', input, undefined, undefined, undefined, bugCase);
+    const instruction = await this.addInstruction(input.id, task, run, input.instruction, 'QUEUE', 'QUEUED', { files: input, bugCase });
     this.emitInstructionUpdate(task.id);
     return instruction;
   }
@@ -3555,8 +3555,15 @@ export class TaskManagerService {
    * under `reservedRunId` when the caller reserved one.
    */
   private async addInstruction(id: string, task: Task, run: Pick<RunRecord, 'id' | 'iterationId' | 'worktreeId' | 'sessionId' | 'requestedSettings'>,
-    text: string, mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: InstructionAttachments, settings?: AgentExecutionSettings,
-    reviewRequest?: ReviewRequestRecord, reservedRunId?: string, bugCase?: BugCaseReference): Promise<TaskInstruction> {
+    text: string, mode: TaskInstruction['mode'], status: TaskInstruction['status'], extra: {
+      files?: InstructionAttachments;
+      settings?: AgentExecutionSettings;
+      reviewRequest?: ReviewRequestRecord;
+      /** The run id a SENDING instruction's turn will take, when the caller starts that turn. */
+      reservedRunId?: string;
+      bugCase?: BugCaseReference;
+    } = {}): Promise<TaskInstruction> {
+    const { files, settings, reviewRequest, reservedRunId, bugCase } = extra;
     const trimmed = this.instructionText(text);
     if (files?.attachmentDraftId || files?.attachmentIds?.length) await this.validateInstructionAttachments(task, run, files, settings);
     return this.store.updateTaskInstructions(task.id, (records, addedIds) => {
@@ -3907,7 +3914,7 @@ export class TaskManagerService {
       const current = records.find((item) => item.id === existing.id)!;
       Object.assign(current, { status: 'SENDING', detail: undefined, updatedAt: new Date().toISOString() });
       return current;
-    }) : await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', input, input.settings, input.reviewRequest, undefined, bugCase);
+    }) : await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', { files: input, settings: input.settings, reviewRequest: input.reviewRequest, bugCase });
     return this.deliverInstruction(record, () => start(record.runId));
   }
 
@@ -4874,7 +4881,6 @@ export class TaskManagerService {
     };
   }
 
-  /** The verified worktree of a task, or of a repository Design, that the Preview conversation reads. */
   // Bug Replay
 
   private bugReplayAccess(): BugReplayTaskAccess {
@@ -4896,7 +4902,6 @@ export class TaskManagerService {
     return { task, worktree };
   }
 
-  /** The task's current implementation turn is queued, running or waiting on the person. */
   /** What the bug's actions depend on: whether a turn ever ran, and what the current one does. */
   private async bugAgentState(taskId: string): Promise<BugAgentState> {
     const detail = await this.store.getTaskDetail(taskId);
@@ -4908,6 +4913,7 @@ export class TaskManagerService {
     return { hasRun, turn: run.status === 'RUNNING' ? 'RUNNING' : 'MOVING' };
   }
 
+  /** The task's current implementation turn is queued, running or waiting on the person. */
   private async agentTurnActive(taskId: string): Promise<boolean> {
     const task = await this.store.getTask(taskId);
     const run = task?.currentRunId ? await this.store.getRun(task.currentRunId) : undefined;
@@ -5081,9 +5087,9 @@ export class TaskManagerService {
   };
 
   returnToBugRecording: BugReplayApi['returnToBugRecording'] = (input) => {
-    const { taskId, sessionId, draft } = bugReplayInput.optionalDraft(input);
+    const { taskId, sessionId } = bugReplayInput.session(input);
     return this.withControlAction(async () => {
-      await this.requireRecording(taskId, sessionId).returnToRecording(sessionId, draft);
+      await this.requireRecording(taskId, sessionId).returnToRecording(sessionId);
       return this.bugSnapshot(taskId);
     });
   };
@@ -5203,6 +5209,7 @@ export class TaskManagerService {
     await this.requireRecording(taskId, sessionId).openPage(sessionId, path);
   }
 
+  /** The verified worktree of a task, or of a repository Design, that the Preview conversation reads. */
   private async requireTaskPreviewContext(taskId: string) {
     await this.requireRepositoryPreviewTask(taskId, 'Preview agent');
     return this.requirePreviewContext(taskId);

@@ -23,7 +23,6 @@ import type {
 
 const FILE_DOMAIN = 'TASK';
 const STORAGE_PREFIX = 'replay';
-const RECEIPT_DOMAIN = 'BUG_REPLAY';
 /** A repository keeps the approvals of its newest recipes; older ones ask again. */
 export const KEPT_APPROVALS_PER_REPOSITORY = 10;
 
@@ -32,8 +31,7 @@ export const BUG_REPLAY_FILE_LIMITS: Record<BugReplayFileKind, number> = {
   NETWORK_LOG: 1024 * 1024,
   CONSOLE_LOG: 256 * 1024,
   SCREENSHOT: 1024 * 1024,
-  RUN_FRAMES: 1024 * 1024,
-  SERVICE_LOG: 512 * 1024
+  RUN_FRAMES: 1024 * 1024
 };
 
 export class BugReplayStoreConflictError extends Error {
@@ -177,8 +175,8 @@ export class SqliteBugReplayStore {
 
   listDecisions(reader: SqlReader, caseId: string): BugCaseDecisionRecord[] {
     return reader
-      .all<{ payload_json: string }>(`SELECT payload_json FROM bug_case_decisions WHERE case_id = ? ORDER BY created_at, rowid`, [caseId])
-      .map((row) => parse<BugCaseDecisionRecord>(row.payload_json));
+      .all<DecisionRow>(`SELECT ${DECISION_COLUMNS} FROM bug_case_decisions WHERE case_id = ? ORDER BY created_at, rowid`, [caseId])
+      .map(decisionFromRow);
   }
 
   // Runs
@@ -239,10 +237,6 @@ export class SqliteBugReplayStore {
     for (const id of ids) transaction.run(`DELETE FROM bug_replay_runs WHERE id = ? AND state = 'SETTLED'`, [id]);
   }
 
-  runNames(reader: SqlReader): Set<string> {
-    return new Set(reader.all<{ name: string }>(`SELECT name FROM bug_replay_runs`).map((row) => row.name));
-  }
-
   // Files
 
   /**
@@ -298,14 +292,14 @@ export class SqliteBugReplayStore {
   }
 
   getFile(reader: SqlReader, id: string): BugReplayFileRecord | undefined {
-    const row = reader.get<{ payload_json: string }>(`SELECT payload_json FROM bug_replay_files WHERE id = ?`, [id]);
-    return row ? parse<BugReplayFileRecord>(row.payload_json) : undefined;
+    const row = reader.get<FileRow>(`SELECT ${FILE_COLUMNS} FROM bug_replay_files WHERE id = ?`, [id]);
+    return row ? fileFromRow(row) : undefined;
   }
 
   filesFor(reader: SqlReader, ownerKind: 'CAPTURE' | 'RUN', ownerId: string): BugReplayFileRecord[] {
     return reader
-      .all<{ payload_json: string }>(`SELECT payload_json FROM bug_replay_files WHERE owner_kind = ? AND owner_id = ? ORDER BY created_at, id`, [ownerKind, ownerId])
-      .map((row) => parse<BugReplayFileRecord>(row.payload_json));
+      .all<FileRow>(`SELECT ${FILE_COLUMNS} FROM bug_replay_files WHERE owner_kind = ? AND owner_id = ? ORDER BY created_at, id`, [ownerKind, ownerId])
+      .map(fileFromRow);
   }
 
   /** Verified bytes of one evidence file; throws when they are missing or corrupt. */
@@ -315,15 +309,6 @@ export class SqliteBugReplayStore {
 
   usedBytes(reader: SqlReader): number {
     return Number(reader.get<{ total: number | null }>(`SELECT SUM(byte_count) AS total FROM managed_files WHERE storage_key LIKE 'replay/%' AND state = 'LIVE'`)?.total ?? 0);
-  }
-
-  bytesForTask(reader: SqlReader, taskId: string): number {
-    return Number(
-      reader.get<{ total: number | null }>(
-        `SELECT SUM(m.byte_count) AS total FROM bug_replay_files f JOIN managed_files m ON m.id = f.managed_file_id WHERE f.task_id = ?`,
-        [taskId]
-      )?.total ?? 0
-    );
   }
 
   /** What one bug's capture and runs keep on disk. */
@@ -354,9 +339,7 @@ export class SqliteBugReplayStore {
 
   /** Removes every Bug Replay row of a task inside the task deletion transaction. */
   deleteForTask(transaction: AppDatabaseTransaction, taskId: string): void {
-    const files = transaction
-      .all<{ payload_json: string }>(`SELECT payload_json FROM bug_replay_files WHERE task_id = ?`, [taskId])
-      .map((row) => parse<BugReplayFileRecord>(row.payload_json));
+    const files = transaction.all<FileRow>(`SELECT ${FILE_COLUMNS} FROM bug_replay_files WHERE task_id = ?`, [taskId]).map(fileFromRow);
     this.deleteFiles(transaction, files);
     transaction.run(`DELETE FROM bug_replay_runs WHERE task_id = ?`, [taskId]);
     transaction.run(`DELETE FROM bug_case_decisions WHERE task_id = ?`, [taskId]);
@@ -413,22 +396,6 @@ export class SqliteBugReplayStore {
 
   // Receipts
 
-  readReceipt(reader: SqlReader, ownerId: string, operationId: string): { fingerprint: string; result: Record<string, unknown> } | undefined {
-    const row = reader.get<{ request_fingerprint: string; result_json: string }>(
-      `SELECT request_fingerprint, result_json FROM operation_receipts WHERE domain = ? AND owner_id = ? AND client_operation_id = ?`,
-      [RECEIPT_DOMAIN, ownerId, operationId]
-    );
-    return row ? { fingerprint: row.request_fingerprint, result: parse<Record<string, unknown>>(row.result_json) } : undefined;
-  }
-
-  writeReceipt(transaction: AppDatabaseTransaction, ownerId: string, operationId: string, fingerprint: string, result: Record<string, unknown>): void {
-    transaction.run(
-      `INSERT INTO operation_receipts (domain, client_operation_id, owner_id, request_fingerprint, result_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [RECEIPT_DOMAIN, operationId, ownerId, fingerprint, JSON.stringify(result), new Date().toISOString()]
-    );
-  }
-
   private async retryPendingGarbageCollection(): Promise<void> {
     const keys = await this.database.read((reader) =>
       reader.all<{ storage_key: string }>(`SELECT storage_key FROM managed_file_gc WHERE storage_key LIKE 'replay/%'`).map((row) => row.storage_key)
@@ -484,6 +451,51 @@ function runFromRow(row: RunRow): StoredBugReplayRun {
     throw new Error('A clean run record failed its integrity check.');
   }
   return run;
+}
+
+interface DecisionRow {
+  id: string;
+  case_id: string;
+  task_id: string;
+  kind: string;
+  version_id: string | null;
+  payload_json: string;
+}
+
+const DECISION_COLUMNS = 'id, case_id, task_id, kind, version_id, payload_json';
+
+/** A decision picks the version the bug runs, so its payload must agree with its row. */
+function decisionFromRow(row: DecisionRow): BugCaseDecisionRecord {
+  const record = parse<BugCaseDecisionRecord>(row.payload_json);
+  if (record.id !== row.id || record.caseId !== row.case_id || record.taskId !== row.task_id || record.kind !== row.kind || (record.versionId ?? null) !== row.version_id) {
+    throw new Error('A bug case decision failed its integrity check.');
+  }
+  return record;
+}
+
+interface FileRow {
+  id: string;
+  task_id: string;
+  owner_kind: string;
+  owner_id: string;
+  managed_file_id: string;
+  kind: string;
+  payload_json: string;
+}
+
+const FILE_COLUMNS = 'id, task_id, owner_kind, owner_id, managed_file_id, kind, payload_json';
+
+/** A file's payload names the bytes deleting it removes, so it must agree with its row and key. */
+function fileFromRow(row: FileRow): BugReplayFileRecord {
+  const record = parse<BugReplayFileRecord>(row.payload_json);
+  if (
+    record.id !== row.id || record.taskId !== row.task_id || record.ownerKind !== row.owner_kind || record.ownerId !== row.owner_id ||
+    record.managedFileId !== row.managed_file_id || record.kind !== row.kind ||
+    !record.storageKey.startsWith(`${STORAGE_PREFIX}/${record.taskId}/${record.ownerId}/${record.id}.`)
+  ) {
+    throw new Error('A bug evidence file failed its integrity check.');
+  }
+  return record;
 }
 
 function caseFromRow(row: { id: string; task_id: string; status: string; record_revision: number; payload_json: string }): BugCaseRecord {

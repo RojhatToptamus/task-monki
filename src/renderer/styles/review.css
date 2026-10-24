@@ -175,7 +175,7 @@
 .tm-review-gap__all { display: flex; flex: 1; align-items: center; gap: 12px; min-width: 0; height: 100%; padding: 0 12px 0 8px; border: 0; background: transparent; color: var(--muted); font: inherit; text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 .tm-review-gap__all:hover { background-color: var(--hover); color: var(--text-soft); }
 /* Inside the file's clip, the keyboard halo is drawn inward so it is never cut. */
-.app-shell[data-input-modality='keyboard'] :is(.tm-review-gap__all, .tm-review-gap__step):focus { box-shadow: var(--focus-halo-inset); }
+:root[data-input-modality='keyboard'] :is(.tm-review-gap__all, .tm-review-gap__step):focus { box-shadow: var(--focus-halo-inset); }
 
 /* Review rows: the line number (the old side's on a removed line) is the comment
    control, with the "+" inside it on hover; then the marker and code that wraps.

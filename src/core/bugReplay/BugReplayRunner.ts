@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isDomAssertion, type BugCaseV1 } from '../../shared/bugCase';
-import { ProcessSupervisor, redactProcessDiagnostic } from '../process/ProcessSupervisor';
+import { ProcessSupervisor } from '../process/ProcessSupervisor';
 import {
   BUG_REPLAY_PLAN_SCHEMA,
   DEFAULT_BUG_REPLAY_TIMEOUTS,
@@ -45,7 +45,7 @@ export interface BugReplayRunnerScreenshot {
 
 export type BugReplayRunnerResult =
   | { kind: 'completed'; frames: BugReplayFrame[]; screenshots: BugReplayRunnerScreenshot[]; browserVersion: string }
-  | { kind: 'invalid'; detail: string; diagnostics: string }
+  | { kind: 'invalid'; detail: string }
   | { kind: 'canceled' };
 
 /**
@@ -66,7 +66,7 @@ export class BugReplayRunner {
 
   async run(request: BugReplayRunnerRequest): Promise<BugReplayRunnerResult> {
     const paths = this.paths();
-    if (!paths) return { kind: 'invalid', detail: 'The replay browser is not available in this build.', diagnostics: '' };
+    if (!paths) return { kind: 'invalid', detail: 'The replay browser is not available in this build.' };
     const control = path.join(request.scratchDir, 'control');
     const outDir = path.join(request.scratchDir, 'out');
     const profile = path.join(request.scratchDir, 'profile');
@@ -99,7 +99,6 @@ export class BugReplayRunner {
     });
     const frames: BugReplayFrameEnvelope[] = [];
     let buffered = '';
-    let stderr = '';
     let violation: string | undefined;
     const note = (reason: string) => {
       violation ??= reason;
@@ -128,9 +127,6 @@ export class BugReplayRunner {
         }
       }
     });
-    child.events.on('stderr', (chunk) => {
-      stderr = (stderr + chunk.toString('utf8')).slice(-64 * 1024);
-    });
     const finished = new Promise<{ exitCode: number | null; error?: string }>((resolve) => {
       child.events.once('close', (terminal) => resolve({ exitCode: terminal.exitCode }));
       child.events.once('terminationUnconfirmed', (event) => resolve({ exitCode: event.leaderExit.exitCode, error: event.error.message }));
@@ -149,21 +145,20 @@ export class BugReplayRunner {
     const terminal = await finished;
     clearTimeout(deadline);
     request.signal.removeEventListener('abort', cancel);
-    const diagnostics = redactProcessDiagnostic(stderr, request.document.sensitiveInputs.map((input) => input.value));
     if (canceled) return { kind: 'canceled' };
     if (terminal.error && !violation) note(`The replay runner did not exit cleanly (${terminal.error.slice(0, 160)}).`);
     const validated = validateFrames(frames, { nonce, planSha256, document: request.document });
-    if (violation) return { kind: 'invalid', detail: violation, diagnostics };
-    if (validated.kind === 'invalid') return { ...validated, diagnostics };
-    if (terminal.exitCode !== 0) return { kind: 'invalid', detail: 'The replay runner stopped.', diagnostics };
+    if (violation) return { kind: 'invalid', detail: violation };
+    if (validated.kind === 'invalid') return validated;
+    if (terminal.exitCode !== 0) return { kind: 'invalid', detail: 'The replay runner stopped.' };
     const screenshots: BugReplayRunnerScreenshot[] = [];
     for (const frame of validated.frames) {
       if (frame.type !== 'screenshot') continue;
-      if (!/^(?:failure|final)-\d+\.png$/.test(frame.name)) return { kind: 'invalid', detail: 'The replay runner named a screenshot it may not write.', diagnostics };
+      if (!/^(?:failure|final)-\d+\.png$/.test(frame.name)) return { kind: 'invalid', detail: 'The replay runner named a screenshot it may not write.' };
       const file = path.join(outDir, frame.name);
       const bytes = await fs.readFile(file).catch(() => undefined);
       if (!bytes || createHash('sha256').update(bytes).digest('hex') !== frame.sha256 || bytes.length !== frame.bytes) {
-        return { kind: 'invalid', detail: 'A screenshot did not match the runner report.', diagnostics };
+        return { kind: 'invalid', detail: 'A screenshot did not match the runner report.' };
       }
       screenshots.push({ name: frame.name, path: file, sha256: frame.sha256, bytes: frame.bytes, purpose: frame.purpose });
     }

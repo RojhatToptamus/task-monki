@@ -51,6 +51,11 @@ describe('renderer style policies', () => {
     expect(css).toMatch(
       /@media \(prefers-reduced-motion: reduce\)[\s\S]*\*,\s*\*::before,\s*\*::after[\s\S]*animation-iteration-count: 1 !important/
     );
+    // Waiting before showing pending is not motion: reduced motion keeps the delay, so a quick
+    // action never flashes its pending label.
+    expect(css).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.tm-pending-label\[data-pending\] > \* \{\s*transition-delay: var\(--pending-delay\) !important/
+    );
   });
 
   it('keeps the Design canvas device presets at their safe maximum widths', async () => {

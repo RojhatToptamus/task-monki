@@ -57,6 +57,8 @@ function acquire(taskId: string, fileId: string, onChange: () => void): { entry:
       held.users -= 1;
       held.lastUsed = Date.now();
       held.listeners.delete(onChange);
+      // A read that failed is tried again by the next surface that shows the file.
+      if (held.failed && held.users === 0 && images.get(key) === held) images.delete(key);
       evictUnused();
     }
   };

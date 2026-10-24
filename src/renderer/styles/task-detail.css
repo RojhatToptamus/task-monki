@@ -248,7 +248,7 @@
   color: var(--text);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-tab:focus {
+:root[data-input-modality='keyboard'] .tm-tab:focus {
   outline: 0;
   border-radius: var(--r-xs);
   box-shadow: 0 0 0 3px var(--focus-ring);
@@ -1580,7 +1580,7 @@
   border-color: var(--text-soft);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-board-editor__swatch:focus-within {
+:root[data-input-modality='keyboard'] .tm-board-editor__swatch:focus-within {
   outline: 0;
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
@@ -2150,12 +2150,12 @@
 
 .tm-filefilter__search input:focus,
 .tm-filefilter__search input:focus-visible,
-.app-shell[data-input-modality='keyboard'] .tm-filefilter__search input:focus {
+:root[data-input-modality='keyboard'] .tm-filefilter__search input:focus {
   background: transparent;
   box-shadow: none;
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-filefilter__search:focus-within {
+:root[data-input-modality='keyboard'] .tm-filefilter__search:focus-within {
   outline: 0;
   background: var(--field-focus);
   box-shadow:

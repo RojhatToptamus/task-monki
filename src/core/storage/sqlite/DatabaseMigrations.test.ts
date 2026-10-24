@@ -52,12 +52,52 @@ it('replaces retired runtime storage while preserving tasks and exact Design sou
   } finally { await database.close(); await fs.rm(fixture.directory, { recursive: true, force: true }); }
 });
 
-it('adds kept replay approvals to a profile with a recorded bug after a backup, keeping the bug', async () => {
+/** The SQL of a migration as this build ships it. */
+function migrationSql(name: string): string {
+  return DATABASE_MIGRATIONS.find(value => value.name === name)!.sql;
+}
+
+/** The approvals table alone, as the development build that numbered it 15 created it: before the lookup indexes. */
+function developmentApprovalsSql(): string {
+  return migrationSql('bug-replay-kept-approvals').split(';').filter(statement => !statement.includes('CREATE INDEX')).join(';');
+}
+
+const LOOKUP_INDEXES = ['bug_case_decisions_task_idx', 'bug_case_decisions_version_idx', 'bug_case_versions_task_idx', 'bug_replay_runs_version_idx'];
+
+it.each([
+  {
+    shape: 'at 15 with Bug Replay records',
+    version: 15,
+    build: (old: DatabaseSync) => { for (const migration of DATABASE_MIGRATIONS.filter(value => value.version <= 15)) old.exec(migration.sql); },
+    approvals: []
+  },
+  {
+    // That build numbered the records 14 and kept approvals 15, before review walkthroughs took 14.
+    shape: 'a development build left at 15',
+    version: 15,
+    build: (old: DatabaseSync) => {
+      for (const migration of DATABASE_MIGRATIONS.filter(value => value.version <= 13)) old.exec(migration.sql);
+      old.exec(migrationSql('bug-replay-records'));
+      old.exec(developmentApprovalsSql());
+    },
+    approvals: ['approval-kept']
+  },
+  {
+    // The same build before it kept approvals: records only.
+    shape: 'a development build left at 14',
+    version: 14,
+    build: (old: DatabaseSync) => {
+      for (const migration of DATABASE_MIGRATIONS.filter(value => value.version <= 13)) old.exec(migration.sql);
+      old.exec(migrationSql('bug-replay-records'));
+    },
+    approvals: []
+  }
+])('adds kept replay approvals to a profile $shape after a backup, keeping its bug', async ({ version, build, approvals }) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-migration-'));
   const file = path.join(directory, 'application.sqlite');
   const old = new DatabaseSync(file);
   old.exec('PRAGMA foreign_keys = ON; BEGIN');
-  for (const migration of DATABASE_MIGRATIONS.filter(value => value.version <= 15)) old.exec(migration.sql);
+  build(old);
   const insert = (table: string, row: Record<string, string | number>) => old.prepare(
     `INSERT INTO ${table} (${Object.keys(row).join(',')}) VALUES (${Object.keys(row).map(() => '?').join(',')})`
   ).run(...Object.values(row));
@@ -67,7 +107,8 @@ it('adds kept replay approvals to a profile with a recorded bug after a backup, 
   insert('tasks', { ...stored, id: 'task', kind: 'NORMAL', runtime_id: 'codex', title: 'Checkout total', prompt: 'Fix the coupon total.', repository_id: 'repo', workflow_phase: 'IN_PROGRESS', resolution: 'NONE', completion_policy: 'MANUAL', phase_version: 1, agent_settings_json: '{}' });
   insert('bug_captures', { id: 'capture', task_id: 'task', payload_json: '{"id":"capture","taskId":"task"}', created_at: timestamp });
   insert('bug_cases', { id: 'case', task_id: 'task', capture_id: 'capture', status: 'ACTIVE', payload_json: '{"id":"case"}', created_at: timestamp, updated_at: timestamp });
-  old.exec(`PRAGMA application_id = ${APP_DATABASE_APPLICATION_ID}; PRAGMA user_version = 15; COMMIT;`);
+  for (const id of approvals) insert('bug_replay_approvals', { id, repository_id: 'repo', approval_digest: 'a'.repeat(64), payload_json: '{}', created_at: timestamp });
+  old.exec(`PRAGMA application_id = ${APP_DATABASE_APPLICATION_ID}; PRAGMA user_version = ${version}; COMMIT;`);
   old.close();
 
   const upgradedFrom: number[] = [];
@@ -76,13 +117,24 @@ it('adds kept replay approvals to a profile with a recorded bug after a backup, 
     await database.backup(path.join(directory, 'before.sqlite'));
   } });
   try {
-    expect(upgradedFrom).toEqual([15]);
+    // The backup holds the profile as it was before the upgrade.
+    expect(upgradedFrom).toEqual([version]);
+    const backup = new DatabaseSync(path.join(directory, 'before.sqlite'), { readOnly: true });
+    expect(backup.prepare('PRAGMA user_version').get()).toEqual({ user_version: version });
+    expect(backup.prepare('SELECT id, status FROM bug_cases').all()).toEqual([{ id: 'case', status: 'ACTIVE' }]);
+    backup.close();
+
     expect(await database.read(reader => reader.get('PRAGMA user_version'))).toEqual({ user_version: 16 });
     expect(await database.read(reader => reader.all('SELECT id, status FROM bug_cases'))).toEqual([{ id: 'case', status: 'ACTIVE' }]);
+    expect(await database.read(reader => reader.all('SELECT id FROM bug_replay_approvals'))).toEqual(approvals.map(id => ({ id })));
+    // Deleting a task's bug looks its rows up by these, whichever build created the tables.
+    expect((await database.read(reader => reader.all<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (${LOOKUP_INDEXES.map(() => '?').join(',')}) ORDER BY name`, LOOKUP_INDEXES
+    ))).map(row => row.name)).toEqual(LOOKUP_INDEXES);
 
     const approve = (id: string) => database.write(tx => tx.run(
       'INSERT INTO bug_replay_approvals (id, repository_id, approval_digest, payload_json, created_at) VALUES (?, ?, ?, ?, ?)',
-      [id, 'repo', 'a'.repeat(64), '{}', timestamp]
+      [id, 'repo', 'b'.repeat(64), '{}', timestamp]
     ));
     await approve('approval-1');
     // One approval per recipe in a repository.
@@ -93,37 +145,6 @@ it('adds kept replay approvals to a profile with a recorded bug after a backup, 
     });
     expect(await database.read(reader => reader.all('SELECT id FROM bug_replay_approvals'))).toEqual([]);
     expect(await database.read(reader => reader.all('PRAGMA foreign_key_check'))).toEqual([]);
-  } finally { await database.close(); await fs.rm(directory, { recursive: true, force: true }); }
-});
-
-it('opens a profile a development build moved to 15 before review walkthroughs took 14, keeping its bug and approval', async () => {
-  // That build numbered the Bug Replay records 14 and kept approvals 15; both of its tables exist.
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-renumbered-migration-'));
-  const file = path.join(directory, 'application.sqlite');
-  const old = new DatabaseSync(file);
-  old.exec('PRAGMA foreign_keys = ON; BEGIN');
-  for (const migration of DATABASE_MIGRATIONS.filter(value => value.version <= 13)) old.exec(migration.sql);
-  for (const name of ['bug-replay-records', 'bug-replay-kept-approvals']) old.exec(DATABASE_MIGRATIONS.find(value => value.name === name)!.sql);
-  const timestamp = '2026-10-19T00:00:00.000Z';
-  const stored = { created_at: timestamp, updated_at: timestamp, payload_json: '{}' };
-  const insert = (table: string, row: Record<string, string | number>) => old.prepare(
-    `INSERT INTO ${table} (${Object.keys(row).join(',')}) VALUES (${Object.keys(row).map(() => '?').join(',')})`
-  ).run(...Object.values(row));
-  insert('repositories', { ...stored, id: 'repo', kind: 'USER_REGISTERED', name: 'shop', path: directory, status: 'READY', remotes_json: '[]' });
-  insert('tasks', { ...stored, id: 'task', kind: 'NORMAL', runtime_id: 'codex', title: 'Checkout total', prompt: 'Fix the coupon total.', repository_id: 'repo', workflow_phase: 'IN_PROGRESS', resolution: 'NONE', completion_policy: 'MANUAL', phase_version: 1, agent_settings_json: '{}' });
-  insert('bug_captures', { id: 'capture', task_id: 'task', payload_json: '{}', created_at: timestamp });
-  insert('bug_cases', { id: 'case', task_id: 'task', capture_id: 'capture', status: 'ACTIVE', payload_json: '{}', created_at: timestamp, updated_at: timestamp });
-  insert('bug_replay_approvals', { id: 'approval', repository_id: 'repo', approval_digest: 'a'.repeat(64), payload_json: '{}', created_at: timestamp });
-  old.exec(`PRAGMA application_id = ${APP_DATABASE_APPLICATION_ID}; PRAGMA user_version = 15; COMMIT;`);
-  old.close();
-
-  const database = await AppDatabase.open(file, { acquireLease: false, beforeSchemaUpgrade: async ({ database }) => {
-    await database.backup(path.join(directory, 'before.sqlite'));
-  } });
-  try {
-    expect(await database.read(reader => reader.get('PRAGMA user_version'))).toEqual({ user_version: 16 });
-    expect(await database.read(reader => reader.all('SELECT id FROM bug_cases'))).toEqual([{ id: 'case' }]);
-    expect(await database.read(reader => reader.all('SELECT id FROM bug_replay_approvals'))).toEqual([{ id: 'approval' }]);
   } finally { await database.close(); await fs.rm(directory, { recursive: true, force: true }); }
 });
 

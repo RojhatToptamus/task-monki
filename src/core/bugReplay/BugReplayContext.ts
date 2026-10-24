@@ -11,7 +11,7 @@ import {
 } from '../../shared/bugReplayClaims';
 import { redactProcessDiagnostic } from '../process/ProcessSupervisor';
 import { checkViews, describeStep } from './BugCaseCompiler';
-import { latestSets, verdictAttempt } from './BugReplayGate';
+import { latestSets, verdictAttempt, verdictEvidence } from './BugReplayGate';
 import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, StoredBugReplayRun } from './BugReplayRecords';
 
 /**
@@ -160,24 +160,18 @@ function evidenceLines(records: BugContextRecords): { before: string[]; after: s
   const { version, runs, gate } = records;
   if (!version) return { before: [], after: [] };
   const signature = new Set(version.document.failureSignature.map((entry) => entry.assertionId));
-  const sets = latestSets(runs, version.id);
-  const reproduced = (sets.qualification ?? []).find((run) => run.outcome === 'REPRODUCED');
+  const { reproduced, decisive } = verdictEvidence(runs, version.id, gate);
   const before = (reproduced?.observations ?? [])
     .filter((observation) => signature.has(observation.assertionId) && observation.observed)
     .slice(0, 3)
     .map((observation) => `Before: ${clip(observation.observed!, 200)}`);
   const after: string[] = [];
-  if (gate.state === 'STILL_FAILING' || gate.state === 'COULDNT_VERIFY' || gate.state === 'FIX_VERIFIED' || gate.state === 'STALE') {
-    const candidates = verdictAttempt(runs, version.id, gate)?.candidates ?? [];
-    const failed = [...candidates].reverse().find((run) => run.outcome === 'FAILED');
-    const passed = [...candidates].reverse().find((run) => run.outcome === 'PASSED');
-    const when = gate.state === 'STALE' ? 'After an earlier change' : 'After your last change';
-    if (failed?.failure) after.push(`${when}: ${clip(failed.failure.detail.replace(/^After: /, ''), 240)}`);
-    else if (gate.state === 'COULDNT_VERIFY' && gate.fact) after.push(`Last verification: ${clip(gate.fact, 240)}`);
-    else if (passed) {
-      for (const observation of passed.observations.filter((item) => signature.has(item.assertionId) && item.observed).slice(0, 3)) {
-        after.push(`${when}: ${clip(observation.observed!, 200)}`);
-      }
+  const when = gate.state === 'STALE' ? 'After an earlier change' : 'After your last change';
+  if (decisive?.outcome === 'FAILED' && decisive.failure) after.push(`${when}: ${clip(decisive.failure.detail.replace(/^After: /, ''), 240)}`);
+  else if (gate.state === 'COULDNT_VERIFY' && gate.fact) after.push(`Last verification: ${clip(gate.fact, 240)}`);
+  else if (decisive) {
+    for (const observation of decisive.observations.filter((item) => signature.has(item.assertionId) && item.observed).slice(0, 3)) {
+      after.push(`${when}: ${clip(observation.observed!, 200)}`);
     }
   }
   return { before, after };

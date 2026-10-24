@@ -279,7 +279,7 @@ export function ProviderOverviewPanel({
               <span>{goal?.providerStatus ?? '—'}</span>
             </dd>
           </dl>
-          {goal?.detail ? <p className="provider-warning">{goal.detail}</p> : null}
+          {goal?.detail ? <p className="tm-notice" data-tone="waiting">{goal.detail}</p> : null}
           {goal ? <RawProviderMessage reference={goal.rawMessage} /> : null}
         </div>
       ) : null}
@@ -423,7 +423,7 @@ function NativeSessionControlsPanel({
         ))}
       </div>
       {updating ? <p className="muted">Updating provider session…</p> : null}
-      {error ? <p className="provider-warning">{error}</p> : null}
+      {error ? <p className="tm-notice" data-tone="waiting">{error}</p> : null}
     </div>
   );
 }

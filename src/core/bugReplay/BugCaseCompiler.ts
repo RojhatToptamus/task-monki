@@ -1,17 +1,16 @@
 import {
   BUG_CASE_KEYS,
+  BUG_CASE_LIMITS,
   BUG_CASE_SCHEMA,
   BugCaseValidationError,
   canonicalJson,
   describeBugCaseAssertion,
   describeTarget,
-  isPositiveAssertion,
-  isRequiredPath,
   normalizeVisibleText,
+  parseBugCase,
   pathTemplateFor,
   readJsonPointer,
   testIdWords,
-  validateBugCaseStructure,
   type BugCaseAssertion,
   type BugCaseCaptured,
   type BugCaseKey,
@@ -45,8 +44,6 @@ import type { BugRecordedObservation } from './BugReplayRecords';
  * The failure signature is exactly the set of checks the recording itself violated, so a
  * reproduction means "the clean copy failed the way the person saw it fail".
  */
-
-export const BUG_CASE_COMPILER_VERSION = 'bug-case-compiler/1';
 
 /** Requests the capture modal and the case consider: what the page asked the app for. */
 const COUNTED_RESOURCE_TYPES = new Set(['fetch', 'xhr', 'document', 'eventsource', 'other']);
@@ -88,7 +85,7 @@ interface MarkedWindow {
 }
 
 /** What the modal shows for a sealed recording, before the person has chosen anything. */
-export function describeCapture(log: BugRecordingLogV1, pageTitle?: string): CompiledCapture {
+export function describeCapture(log: BugRecordingLogV1): CompiledCapture {
   const partial = partialReason(log);
   const window = markedWindow(log);
   const picks = (log.mark?.picks ?? []).map((pick, index) => pickView(pick, index));
@@ -110,7 +107,6 @@ export function describeCapture(log: BugRecordingLogV1, pageTitle?: string): Com
     .slice(-10)
     .map((entry) => entry.text.slice(0, 240));
   const steps = window ? compileSteps(window.actions) : { steps: [], sensitiveInputs: [], times: [] };
-  void pageTitle;
   return {
     picks,
     requests,
@@ -263,13 +259,26 @@ export function compileBugCase(log: BugRecordingLogV1, draft: BugCaptureDraft): 
   if (signature.length === 0) {
     return { checks, reproducible: false, reason: alreadyHolds ?? 'Nothing you expect was wrong in the recording' };
   }
-  try {
-    validateBugCaseStructure(document);
-  } catch (error) {
-    const reason = error instanceof BugCaseValidationError ? error.reason : 'These expectations cannot be reproduced.';
-    return { checks, reproducible: false, reason: reason.replace(/\.$/, '') };
+  if (steps.length > BUG_CASE_LIMITS.steps) {
+    return { checks, reproducible: false, reason: `A replay holds at most ${BUG_CASE_LIMITS.steps} steps; this recording has ${steps.length}` };
   }
+  const refused = caseRefusal(document);
+  if (refused) return { checks, reproducible: false, reason: refused };
   return { document, recorded, checks, reproducible: true };
+}
+
+/**
+ * Why the runner would refuse this case, or undefined. Saving uses the runner's own parse of the
+ * stored JSON, so a saved bug always fits its limits and can be replayed.
+ */
+export function caseRefusal(document: BugCaseV1): string | undefined {
+  if (document.assertions.length > BUG_CASE_LIMITS.assertions) return `Keep at most ${BUG_CASE_LIMITS.assertions} expectations`;
+  try {
+    parseBugCase(JSON.parse(JSON.stringify(document)));
+    return undefined;
+  } catch (error) {
+    return (error instanceof BugCaseValidationError ? error.reason : 'These expectations cannot be reproduced.').replace(/\.$/, '');
+  }
 }
 
 /** The checks as the modal and the Bug section state them. */
@@ -692,6 +701,11 @@ function succeeded(request: BugRecordingRequest): boolean {
 }
 
 /** Rows for every declared-origin request the marked action started, grouped by method and path template. */
+/** A request that changes something: Sent once applies to it, and its answer is checked by default. */
+export function isWriteMethod(method: string): boolean {
+  return !['GET', 'HEAD', 'OPTIONS'].includes(method);
+}
+
 export function requestRows(requests: BugRecordingRequest[]): BugCaptureRequestRow[] {
   const rows = new Map<string, BugCaptureRequestRow & { all: BugRecordingRequest[] }>();
   for (const request of requests) {
@@ -713,6 +727,7 @@ export function requestRows(requests: BugRecordingRequest[]): BugCaptureRequestR
       observed: observedStatus(request),
       count: 1,
       succeeded: false,
+      write: isWriteMethod(request.method),
       defaultCheck: 'none',
       defaultSentOnce: false,
       all: [request]
@@ -720,7 +735,7 @@ export function requestRows(requests: BugRecordingRequest[]): BugCaptureRequestR
   }
   return [...rows.values()].map(({ all, ...row }) => {
     const allSucceeded = all.every(succeeded);
-    const isWrite = row.method !== 'GET' && row.method !== 'HEAD' && row.method !== 'OPTIONS';
+    const isWrite = row.write;
     const failing = all.find((request) => !succeeded(request));
     return {
       ...row,
@@ -898,14 +913,6 @@ function scalars(document: unknown, pointer = '', depth = 0, out: Array<{ pointe
   return out;
 }
 
-/** Up to 20 scalar fields of a body, for Check a value. */
-export function bodyFields(document: unknown): Array<{ pointer: string; value: string }> {
-  return scalars(document)
-    .filter((entry) => entry.pointer !== '')
-    .slice(0, 20)
-    .map((entry) => ({ pointer: entry.pointer, value: canonicalJson(entry.value) }));
-}
-
 export function describeStep(step: BugCaseStep, sensitive = true): string {
   // What a person reads on the page first; a test id only when nothing else names it.
   const name = (target: BugCaseTarget) => {
@@ -939,11 +946,4 @@ export function describeStep(step: BugCaseStep, sensitive = true): string {
     case 'dialog':
       return step.action === 'accept' ? 'Accept the dialog' : 'Dismiss the dialog';
   }
-}
-
-/** True when the document can be verified: its signature holds a positive check or sits beside a required path. */
-export function hasVerifiableSignature(document: BugCaseV1): boolean {
-  const byId = new Map(document.assertions.map((assertion) => [assertion.id, assertion]));
-  const signature = document.failureSignature.map((entry) => byId.get(entry.assertionId)).filter(Boolean) as BugCaseAssertion[];
-  return signature.some(isPositiveAssertion) || document.assertions.some(isRequiredPath);
 }

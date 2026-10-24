@@ -238,7 +238,7 @@
 
 /* The keyboard row, as in ActionMenu: the selected fill and the halo drawn
    inward, so the scrolling list never cuts it. */
-.app-shell[data-input-modality='keyboard'] .tm-repository-select__option:focus {
+:root[data-input-modality='keyboard'] .tm-repository-select__option:focus {
   outline: 0;
   background-color: var(--sel);
   box-shadow: var(--focus-halo-inset);
@@ -294,7 +294,7 @@
 }
 
 /* The list scrolls, so the focused row's halo is drawn inside it. */
-.app-shell[data-input-modality='keyboard'] .tm-repository-picker__option:focus-within {
+:root[data-input-modality='keyboard'] .tm-repository-picker__option:focus-within {
   outline: 0;
   box-shadow: var(--focus-halo-inset);
 }
@@ -488,7 +488,7 @@
   display: none;
 }
 
-.app-shell[data-input-modality='keyboard'] .task-attachment__remove:focus {
+:root[data-input-modality='keyboard'] .task-attachment__remove:focus {
   outline: 0;
   box-shadow: var(--focus-halo);
 }
@@ -862,12 +862,12 @@
 }
 
 .import-work__search input:focus,
-.app-shell[data-input-modality='keyboard'] .import-work__search input:focus {
+:root[data-input-modality='keyboard'] .import-work__search input:focus {
   background: transparent;
   box-shadow: none;
 }
 
-.app-shell[data-input-modality='keyboard'] .import-work__picker:focus-within {
+:root[data-input-modality='keyboard'] .import-work__picker:focus-within {
   box-shadow: var(--focus-halo);
 }
 
@@ -899,7 +899,7 @@
 .import-work__checkout[aria-selected='true'] { background-color: var(--sel); color: var(--text); }
 .import-work__checkout:disabled { background-color: var(--field-disabled); color: var(--text-disabled); }
 /* The list scrolls, so the active option's halo is drawn inside the row. */
-.app-shell[data-input-modality='keyboard'] .import-work__checkout:focus {
+:root[data-input-modality='keyboard'] .import-work__checkout:focus {
   outline: 0;
   box-shadow: var(--focus-halo-inset);
 }
@@ -976,8 +976,7 @@
 .remote-work__header { min-height: var(--lh-ui); }
 .remote-work__header .tm-composer-chip { margin-block: calc((var(--lh-ui) - var(--h-toolbar)) / 2); }
 /* Why the list could not be read, with Retry at its end when retrying can help. */
-.remote-work__problem { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px; }
-.remote-work__problem code { color: inherit; font-size: var(--t-meta); }
+.import-work__error code { color: inherit; font-size: var(--t-meta); }
 /* An issue or pull request row: its number and title, then who and when, on one line. */
 .remote-work__identity { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .remote-work__title { flex: 1 1 0%; min-width: 0; overflow: hidden; color: inherit; font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }

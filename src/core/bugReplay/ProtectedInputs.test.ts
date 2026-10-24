@@ -1,9 +1,15 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { changedProtectedInputs, planProtectedInputs } from './ProtectedInputs';
-import type { ReplayTreeReader } from './ReplayDerivation';
+import { changedProtectedInputs, planProtectedInputs, type ProtectedTree } from './ProtectedInputs';
 
-function tree(files: Record<string, string>): ReplayTreeReader {
-  return { files: Object.keys(files), readText: async (relativePath) => files[relativePath] };
+/** A tree as git reads it: each file's text, and its blob id the way `git ls-tree` reports it. */
+function tree(files: Record<string, string>): ProtectedTree {
+  const blob = (text: string) => createHash('sha1').update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest('hex');
+  return {
+    files: Object.keys(files),
+    readText: async (relativePath) => files[relativePath],
+    blobs: async (paths) => new Map(paths.filter((file) => file in files).map((file) => [file, blob(files[file])]))
+  };
 }
 
 const SEEDED_APP = {

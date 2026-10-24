@@ -2,6 +2,7 @@ import { useId, useRef, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { useDialogFocusBoundary } from '../dialogFocus';
 import { ModalFrame } from '../ModalFrame';
+import { useOpenReport } from '../presence';
 import { PendingLabel } from '../StableLabel';
 
 /**
@@ -18,6 +19,7 @@ export function BugConfirmDialog({
   returnFocus,
   returnFocusRef,
   shouldReturnFocus,
+  onOpenChange,
   onKeep,
   onConfirm
 }: {
@@ -33,6 +35,8 @@ export function BugConfirmDialog({
   returnFocusRef?: RefObject<HTMLElement | null>;
   /** False when the caller has already placed focus, after the act removed its control. */
   shouldReturnFocus?(): boolean;
+  /** Told while the dialog is open, so the page behind it is inert. */
+  onOpenChange?(open: boolean): void;
   onKeep(): void;
   onConfirm(): void;
 }) {
@@ -40,8 +44,9 @@ export function BugConfirmDialog({
   const titleId = useId();
   const bodyId = useId();
   useDialogFocusBoundary({ dialogRef: panelRef, returnFocus, fallbackReturnFocusRef: returnFocusRef, shouldReturnFocus, busy, onClose: onKeep });
+  useOpenReport(onOpenChange);
   return createPortal(
-    <ModalFrame labelledBy={titleId} describedBy={bodyId} pending={busy} onDismiss={busy ? undefined : onKeep}>
+    <ModalFrame labelledBy={titleId} describedBy={bodyId} pending={busy} onDismiss={onKeep}>
       <div ref={panelRef} className="tm-modal__panel tm-bugconfirm" tabIndex={-1}>
         <h3 id={titleId}>{title}</h3>
         <p id={bodyId}>{body}</p>

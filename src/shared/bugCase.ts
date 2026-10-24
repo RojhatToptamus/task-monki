@@ -13,7 +13,6 @@ export const BUG_CASE_LIMITS = {
   domAssertions: 5,
   candidates: 8,
   valueChars: 4096,
-  documentBytes: 48 * 1024,
   pathChars: 512,
   queryEntries: 32,
   sensitiveInputs: 20,
@@ -233,9 +232,6 @@ export function parseBugCase(value: unknown): BugCaseV1 {
   if (steps.slice(1).some((step) => step.kind === 'navigate')) {
     throw new BugCaseValidationError('Only the first step may open a page.');
   }
-  if (steps[steps.length - 1].kind === 'dialog' && steps.length === 1) {
-    throw new BugCaseValidationError('A dialog step needs an action before it.');
-  }
   const assertions = requireArray(record.assertions, 'Checks', 1, BUG_CASE_LIMITS.assertions).map((item) =>
     parseAssertion(item, roles)
   );
@@ -260,7 +256,7 @@ export function parseBugCase(value: unknown): BugCaseV1 {
 }
 
 /** Cross-field rules every stored case satisfies. */
-export function validateBugCaseStructure(document: BugCaseV1): void {
+function validateBugCaseStructure(document: BugCaseV1): void {
   const ids = new Set<string>();
   for (const item of [...document.steps, ...document.assertions]) {
     if (ids.has(item.id)) throw new BugCaseValidationError(`The id ${item.id} repeats.`);

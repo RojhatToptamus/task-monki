@@ -82,7 +82,8 @@ export function BugRecordingView({
       document.removeEventListener('scroll', place, true);
       hide();
     };
-  }, [taskId, sessionId, hidden, width, height]);
+    // A new width or height reaches the observer above; the view is never taken down for it.
+  }, [taskId, sessionId, hidden]);
   return (
     <div
       ref={ref}

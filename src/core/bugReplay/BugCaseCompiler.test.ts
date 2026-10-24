@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseBugCase } from '../../shared/bugCase';
 import { checkoutRecording, TOTAL_PICK, totalDraft } from '../../testSupport/bugReplay/bugReplayFixtures';
-import { compileBugCase, describeCapture, suggestValue } from './BugCaseCompiler';
+import { compileBugCase, describeCapture, requestKey, suggestValue } from './BugCaseCompiler';
 
 describe('Bug case compiler', () => {
   it('turns the check the recording violated into the failure signature, named as the page shows it', () => {
@@ -22,6 +22,33 @@ describe('Bug case compiler', () => {
     ]);
     // What is saved parses as the strict document the runner accepts.
     expect(parseBugCase(JSON.parse(JSON.stringify(document)))).toEqual(document);
+  });
+
+  it('refuses a case the runner would refuse, so a saved bug can always be replayed', () => {
+    // A long session before the bug: more steps than a replay holds.
+    const long = checkoutRecording();
+    const [open, ...rest] = long.actions;
+    const browsing = Array.from({ length: 130 }, (_, index) => ({
+      index: 0,
+      t: 200 + index,
+      kind: 'click' as const,
+      target: { tag: 'button', testIds: [], role: 'button', name: `Product ${index}`, text: `Product ${index}`, css: `#product-${index}` }
+    }));
+    long.actions = [open, ...browsing, ...rest].map((action, index) => ({ ...action, index }));
+    long.mark!.actionIndex = long.actions.length - 1;
+
+    expect(compileBugCase(long, totalDraft())).toMatchObject({ reproducible: false, reason: 'A replay holds at most 120 steps; this recording has 133' });
+
+    // One action that sent many writes, each kept with its default rules: more checks than a case holds.
+    const busy = checkoutRecording();
+    busy.requests.push(...Array.from({ length: 11 }, (_, index) => ({
+      ...busy.requests[2],
+      id: `w${index}`,
+      path: `/api/cart/line${index}`
+    })));
+    const requestRules = busy.requests.slice(3).map((request) => ({ requestKey: requestKey(request), check: 'success' as const, sentOnce: true }));
+
+    expect(compileBugCase(busy, totalDraft({ requestRules }))).toMatchObject({ reproducible: false, reason: 'Keep at most 20 expectations' });
   });
 
   it('says what to write when the expectation already matches the page', () => {
@@ -82,7 +109,7 @@ describe('Bug case compiler', () => {
     const log = checkoutRecording();
     log.actions[1] = { ...log.actions[1], value: undefined, sensitive: true, target: { tag: 'input', inputType: 'password', testIds: [], label: 'Password', css: '#password' } };
 
-    const capture = describeCapture(log, 'Checkout');
+    const capture = describeCapture(log);
 
     expect(capture.stepSummaries).toEqual(['Open /', 'Type a password into "Password"', 'Click "Apply coupon"']);
     // The suggested title states what was observed, under the same name the pick and the checks use.
@@ -95,7 +122,7 @@ describe('Bug case compiler', () => {
       picks: [{ target: { tag: 'p', testIds: [{ attribute: 'data-testid', value: 'order-status' }], text: 'Your cart is empty.', context: 'Cart total: $0.00 Checkout', css: '#order-status' }, text: 'Your cart is empty.', visible: true, count: 1 }]
     });
 
-    expect(describeCapture(log, 'Checkout').picks[0].label).toBe('Order status');
+    expect(describeCapture(log).picks[0].label).toBe('Order status');
   });
 
   it('names an element by its test id in words when nothing on the page names it', () => {
@@ -103,7 +130,7 @@ describe('Bug case compiler', () => {
       picks: [{ target: { tag: 'span', testIds: [{ attribute: 'data-testid', value: 'noteCount' }], text: '0', css: '#count' }, text: '0', visible: true, count: 1 }]
     });
 
-    const capture = describeCapture(log, 'Notes');
+    const capture = describeCapture(log);
     const compiled = compileBugCase(log, { title: 'Notes', checks: [{ pickIndex: 0, template: 'equals', expected: '1', alsoAfterReload: false }], requestRules: [], valueChecks: [] });
 
     expect(capture.picks[0].label).toBe('Note count');

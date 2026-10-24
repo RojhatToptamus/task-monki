@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { BugCaptureView, BugReplayGateProjection, BugRecordingSessionView } from '../../shared/bugReplay';
+import type { BugCaptureView, BugReplayGateProjection, BugReplayRunView, BugRecordingSessionView } from '../../shared/bugReplay';
 import { makeTaskRecord } from '../../testSupport/rendererRecords';
 import { totalDraft } from '../../testSupport/bugReplay/bugReplayFixtures';
 import {
   bugActionLabel,
   bugOwnsNowPanel,
+  bugRunRows,
   captureSaveState,
   describeBugAttention,
   expectationsDraft,
@@ -13,7 +14,7 @@ import {
   keepExpectation,
   layoutBugActions,
   openExpectationsEditor,
-  recordingHead,
+  recordingTitle,
   removeExpectationRow,
   shownExpectationRows
 } from './bugReplay';
@@ -24,6 +25,18 @@ function gate(overrides: Partial<BugReplayGateProjection>): BugReplayGateProject
   return { caseId: 'case-1', title: 'Coupon total is wrong', state: 'REPRODUCED', versionId: 'version-1', version: 1, updatedAt: '2026-10-17T10:00:00.000Z', ...overrides };
 }
 
+describe('Replay rows', () => {
+  it('keeps the word of a replay of earlier expectations but no tone: it is no verdict on the current ones', () => {
+    const passed: BugReplayRunView = {
+      id: 'run-1', kind: 'CANDIDATE', state: 'SETTLED', outcome: 'PASSED', counted: true, versionId: 'version-1',
+      observations: [], facts: [], screenshotFileIds: [], queuedAt: '2026-10-17T10:00:00.000Z'
+    };
+
+    expect(bugRunRows([passed], 'version-2')[0]).toMatchObject({ word: 'Passed', earlier: true, tone: 'neutral' });
+    expect(bugRunRows([passed], 'version-1')[0]).toMatchObject({ word: 'Passed', earlier: false, tone: 'success' });
+  });
+});
+
 describe('Bug actions', () => {
   it('leads with the decision the bug waits on, then the state step, and keeps the rest in the menu', () => {
     expect(layoutBugActions(['send-to-agent', 'verify-again', 'run-again', 'remove'], 'REPRODUCED')).toEqual({
@@ -32,10 +45,12 @@ describe('Bug actions', () => {
       menu: ['verify-again', 'run-again', 'remove']
     });
     // Replays waiting on approval hold the step alone: keeping the approval stays beside approving
-    // for now, and the state's own steps wait in the menu instead of pushing it out of view.
+    // for now, declining is apart (every surface puts it first), and the state's own steps wait in
+    // the menu instead of pushing it out of view.
     expect(layoutBugActions(['allow-runs', 'always-allow-runs', 'send-to-agent', 'cancel-run', 'remove'], 'REPRODUCING')).toEqual({
       primary: 'allow-runs',
-      secondary: ['always-allow-runs', 'cancel-run'],
+      secondary: ['always-allow-runs'],
+      decline: 'cancel-run',
       menu: ['send-to-agent', 'remove']
     });
     // Nothing is owed once the fix is verified: every action waits in the menu.
@@ -115,17 +130,17 @@ describe('Recording workspace', () => {
     ...overrides
   });
 
-  it('names one state in the bar, in neutral ink, and leaves decisions and failures to the card in the page\'s place', () => {
+  it('names one state in the bar, and leaves decisions and failures to the card in the page\'s place', () => {
     // The page's path belongs to the page's own bar, not the workspace's.
-    expect(recordingHead(recording({ phase: 'RECORDING', routePath: '/checkout' }))).toEqual({ title: 'Recording', tone: 'neutral', working: false });
-    expect(recordingHead(recording({ phase: 'MARKING', detail: 'Point at what is wrong' }))).toEqual({ title: "Point at what's wrong", tone: 'neutral', working: false });
-    expect(recordingHead(recording({ phase: 'MARKING' }))).toMatchObject({ title: 'Mark the bug' });
-    expect(recordingHead(recording({ phase: 'STARTING' }))).toEqual({ title: 'Starting the app', tone: 'neutral', working: true });
+    expect(recordingTitle(recording({ phase: 'RECORDING', routePath: '/checkout' }))).toBe('Recording');
+    expect(recordingTitle(recording({ phase: 'MARKING', detail: 'Point at what is wrong' }))).toBe("Point at what's wrong");
+    expect(recordingTitle(recording({ phase: 'MARKING' }))).toBe('Mark the bug');
+    expect(recordingTitle(recording({ phase: 'STARTING' }))).toBe('Starting the app');
     for (const phase of ['NEEDS_APPROVAL', 'CHOOSING_ENV_FILES', 'FAILED'] as const) {
-      expect(recordingHead(recording({ phase, failure: { title: 'The web service stopped', detail: 'x' } }))).toEqual({ title: 'Record a bug', tone: 'neutral', working: false });
+      expect(recordingTitle(recording({ phase, failure: { title: 'The web service stopped', detail: 'x' } }))).toBe('Record a bug');
     }
     // A recording that stopped says so; the page's place says why.
-    expect(recordingHead(recording({ phase: 'INTERRUPTED', failure: { title: 'The web service stopped', detail: 'x' } }))).toEqual({ title: 'Recording stopped', tone: 'neutral', working: false });
+    expect(recordingTitle(recording({ phase: 'INTERRUPTED', failure: { title: 'The web service stopped', detail: 'x' } }))).toBe('Recording stopped');
   });
 
   it('fits the recorded viewport into the space without enlarging it', () => {

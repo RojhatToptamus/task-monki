@@ -105,7 +105,8 @@ export function BugExpectationsDrawer({
   return createPortal(
     <div {...layer} className="tm-bugdrawer">
       <div className="tm-bugdrawer__scrim" onClick={saving ? undefined : onClose} />
-      <aside ref={panelRef} className="tm-bugdrawer__panel tm-bugdrawer__panel--form" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
+      <aside ref={panelRef} className="tm-bugdrawer__panel tm-bugdrawer__panel--form" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
+        data-pending={saving || undefined}>
         <header className="tm-bugdrawer__head">
           <h3 id={titleId} className="tm-bugdrawer__title">Edit expectations</h3>
         </header>

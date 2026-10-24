@@ -659,29 +659,40 @@ export function TaskDetail(props: TaskDetailProps) {
     return () => window.clearTimeout(timeout);
   }, [reviewStartPending, task?.id]);
 
+  const repositoryBlockedReason =
+    props.repository?.status !== 'AVAILABLE'
+      ? 'Reconnect this repository before running repository actions.'
+      : undefined;
+  const runtimeBlockedReason =
+    props.runtimeState && !props.runtimeState.preflight.readiness.canStart
+      ? props.runtimeState.preflight.readiness.detail ?? props.runtimeState.preflight.readiness.summary
+      : undefined;
   // The task's recorded bug: one read shared by the Overview, the Now panel and the Preview tab.
   const notify = useNotify();
   const bug = useBugReplay(task?.kind === 'NORMAL' ? task.id : undefined);
   const bugActions = useBugActions(task?.id ?? '', bug.snapshot, {
     onOpenRecording: () => setTab('preview'),
     onError: (message) => notify(message, 'error'),
+    // Sending the bug starts or steers an agent turn, so the task's own pause holds it too.
+    blockedReason: repositoryBlockedReason ?? runtimeBlockedReason,
     returnFocusRef: detailRootRef
   }, bug.refresh);
   // The turns that carried the recorded bug: the start or follow-up that sent it, and any queued
-  // instruction that held it until its turn.
+  // instruction that held it until its turn. A turn that carried an earlier bug is not this one's.
   const bugTurns = useMemo(() => {
+    const caseId = bug.snapshot?.activeCase?.id ?? task?.projection.bugReplay?.caseId;
     const title = bug.snapshot?.activeCase?.title ?? task?.projection.bugReplay?.title;
-    if (!title) return undefined;
+    if (!caseId || !title) return undefined;
     const runIds = new Set<string>();
     for (const event of props.events) {
       if (event.type !== 'BUG_HANDOFF_CHANGED') continue;
-      const payload = event.payload as { handoff?: unknown; gate?: { handoff?: { runId?: unknown } } } | undefined;
+      const payload = event.payload as { handoff?: unknown; gate?: { caseId?: unknown; handoff?: { runId?: unknown } } } | undefined;
       const runId = payload?.gate?.handoff?.runId;
-      if (payload?.handoff === 'SENT' && typeof runId === 'string') runIds.add(runId);
+      if (payload?.handoff === 'SENT' && payload.gate?.caseId === caseId && typeof runId === 'string') runIds.add(runId);
     }
-    for (const instruction of props.agentInstructions) if (instruction.bugCase && instruction.runId) runIds.add(instruction.runId);
+    for (const instruction of props.agentInstructions) if (instruction.bugCase?.caseId === caseId && instruction.runId) runIds.add(instruction.runId);
     return runIds.size ? { runIds, title, onOpen: () => setTab('overview') } : undefined;
-  }, [bug.snapshot?.activeCase?.title, task?.projection.bugReplay?.title, props.events, props.agentInstructions]);
+  }, [bug.snapshot?.activeCase?.id, bug.snapshot?.activeCase?.title, task?.projection.bugReplay?.caseId, task?.projection.bugReplay?.title, props.events, props.agentInstructions]);
   const modalOpen = taskDetailModalOpen || bugActions.modalOpen;
   useLayoutEffect(() => {
     props.onModalOpenChange(modalOpen);
@@ -1365,14 +1376,6 @@ export function TaskDetail(props: TaskDetailProps) {
       : fixed > 0 ? `${runtimeName} fixed ${fixed} of ${answers.length} ${noun(answers.length)}`
         : `${runtimeName} answered ${answers.length} ${noun(answers.length)}`;
   })();
-  const repositoryBlockedReason =
-    props.repository?.status !== 'AVAILABLE'
-      ? 'Reconnect this repository before running repository actions.'
-      : undefined;
-  const runtimeBlockedReason =
-    props.runtimeState && !props.runtimeState.preflight.readiness.canStart
-      ? props.runtimeState.preflight.readiness.detail ?? props.runtimeState.preflight.readiness.summary
-      : undefined;
   const conversationAction: SlotAction = { label: 'Open conversation', onClick: () => setTab('agent') };
   const startTaskAction = (action: () => Promise<void>) => () =>
     void runReviewAction(async () => {
@@ -2259,6 +2262,7 @@ export function TaskDetail(props: TaskDetailProps) {
             recording={bug.snapshot.recording}
             replaces={bug.snapshot.activeCase?.title}
             covered={modalOpen || taskMenuOpen || Boolean(props.occluded) || Boolean(sidePanel && !sidePanelLayout.docked)}
+            onModalOpenChange={bugActions.onLayerOpenChange}
             onSaved={() => setTab('overview')}
             onAskPreviewAgent={props.previewAgent && !props.previewAgent.disabledReason ? (text) => {
               const agent = props.previewAgent!;
@@ -2278,6 +2282,7 @@ export function TaskDetail(props: TaskDetailProps) {
         {tab === 'preview' && !bug.snapshot?.recording ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name}
           recordBug={bug.snapshot?.availability.canRecord ? {
             disabledReason: bug.snapshot.availability.recordDisabledReason,
+            pending: bugActions.busy === 'record-again',
             onRecord: () => bugActions.perform('record-again')
           } : undefined}
           worktree={worktree} worktreePending={props.worktreePreparationPending} onModalOpenChange={setPreviewModalOpen}
@@ -2440,7 +2445,8 @@ export function TaskDetail(props: TaskDetailProps) {
               rootRef={debugActivityRef}
             />
             <TaskHealthFindings findings={task.projection.findings} />
-            {bug.snapshot ? <BugEvidencePanel taskId={task.id} snapshot={bug.snapshot} onError={(message) => notify(message, 'error')} refresh={bug.refresh} /> : null}
+            {bug.snapshot ? <BugEvidencePanel taskId={task.id} snapshot={bug.snapshot} onError={(message) => notify(message, 'error')}
+              onModalOpenChange={bugActions.onLayerOpenChange} refresh={bug.refresh} /> : null}
             <div className="tm-debug__notice">
               Provider diagnostics are for troubleshooting. Verified evidence remains the source of truth.
             </div>
@@ -2526,7 +2532,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
       {bugActions.dialogs}
 
-      {mergeModalOpen && prStatus.prHeadSha ? (
+      <Presence>{mergeModalOpen && prStatus.prHeadSha ? (
         <MergePullRequestModal
           platform={remoteProviderName(provider)}
           noun={remoteWorkNoun(provider, 'PULL_REQUEST')}
@@ -2540,9 +2546,9 @@ export function TaskDetail(props: TaskDetailProps) {
           onCancel={() => setMergeModalOpen(false)}
           fallbackReturnFocusRef={detailRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {replyModalOpen ? (
+      <Presence>{replyModalOpen ? (
         <ReplyToReviewersModal
           platform={remoteProviderName(provider)}
           agent={runtimeName}
@@ -2564,7 +2570,7 @@ export function TaskDetail(props: TaskDetailProps) {
           onCancel={() => setReplyModalOpen(false)}
           fallbackReturnFocusRef={detailRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
       {/* Closing it lets it leave; docking it as the window widens moves it at once. */}
       <Presence exit={!sidePanel}>{sidePanel && !sidePanelLayout.docked ? <FloatingSidePanel>{sidePanel.element}</FloatingSidePanel> : null}</Presence>

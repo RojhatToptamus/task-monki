@@ -108,7 +108,7 @@
 /* The history is a scroll region: it never shows the browser outline, and from
    the keyboard it shows the token ring inside its own edge. */
 .tm-conversation__viewport:focus { outline: none; }
-.app-shell[data-input-modality='keyboard'] .tm-conversation__viewport:focus-visible { box-shadow: var(--focus-halo-inset); }
+:root[data-input-modality='keyboard'] .tm-conversation__viewport:focus-visible { box-shadow: var(--focus-halo-inset); }
 .tm-conversation__content { min-width: 0; }
 /* The task's tabs stay pinned above the conversation while it scrolls. */
 .tm-conversation__header { position: sticky; top: 0; z-index: var(--layer-sticky); background: var(--surface); }

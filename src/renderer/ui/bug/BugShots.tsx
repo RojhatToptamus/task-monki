@@ -5,6 +5,7 @@ import { boxUnion, containRegion, focusRegion, outlineStyle, regionStyle } from 
 import { formatShortAge } from '../../model/timeAgo';
 import { useDialogFocusBoundary } from '../dialogFocus';
 import { ModalFrame } from '../ModalFrame';
+import { useOpenReport } from '../presence';
 import { useBugImage } from './BugImage';
 
 /**
@@ -65,6 +66,7 @@ export function BugCompareDialog({
   shots,
   viewport,
   initial,
+  onOpenChange,
   onClose
 }: {
   taskId: string;
@@ -73,6 +75,8 @@ export function BugCompareDialog({
   shots: { before?: BugShotView; after?: BugShotView };
   viewport: { width: number; height: number };
   initial: BugShotSide;
+  /** Told while the dialog is open, so the page behind it is inert. */
+  onOpenChange?(open: boolean): void;
   onClose(): void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -84,6 +88,7 @@ export function BugCompareDialog({
   // The pictures are read, not filled in: focus starts on the side shown, where the arrow keys
   // switch sides; with one side, on Close. No tooltip opens to take the first Escape.
   useDialogFocusBoundary({ dialogRef: panelRef, initialFocusRef: openedOn, busy: false, onClose });
+  useOpenReport(onOpenChange);
   useEffect(() => {
     if (sides.length < 2) return;
     const onKey = (event: KeyboardEvent) => {
@@ -107,7 +112,7 @@ export function BugCompareDialog({
           <time className="tm-bugcompare__time" dateTime={caption.at} title={new Date(caption.at).toLocaleString()}>{formatShortAge(caption.at)}</time>
           {sides.length < 2 ? <span className="tm-bugcompare__side-name">{caption.name}</span> : null}
           {sides.length > 1 ? (
-            <div className="segmented tm-bugcompare__switch" role="group" aria-label="Screenshot">
+            <div className="segmented segmented--compact tm-bugcompare__switch" role="group" aria-label="Screenshot">
               {sides.map((option) => (
                 <button key={option} ref={(element) => {
                   if (element) switchRefs.current.set(option, element);

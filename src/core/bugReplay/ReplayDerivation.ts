@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { PreviewSpec } from 'previewhost';
+import { canonicalJson } from '../../shared/bugCase';
 import { parseConfigurationFile } from '../preview/ApplicationPreviewConfiguration';
 
 /**
@@ -179,14 +180,13 @@ export async function deriveReplaySpec(input: ReplayDerivationInput): Promise<De
   }
 
   // Dependencies install from the lockfile in a clean copy; add the job a recipe for live folders omits.
-  const addedInstallJobs = await ensureInstallJobs(environment, services, serviceDirectories, input, commands);
+  const addedInstallJobs = await ensureInstallJobs(services, serviceDirectories, input, commands);
 
-  for (const [id, service] of Object.entries(services)) {
+  for (const service of Object.values(services)) {
     if (service.type !== 'job') continue;
     const env = { ...((service.env ?? {}) as Record<string, unknown>) };
     env.GIT_CEILING_DIRECTORIES = input.ceiling;
     service.env = env;
-    void id;
   }
   environment.name = input.runName;
   const hasInstall = Object.values(services).some((service) => service.type === 'job' && isInstallCommand(service.command as string[]));
@@ -230,13 +230,11 @@ function toEnvironment(spec: PreviewSpec): Record<string, unknown> & { services:
 }
 
 async function ensureInstallJobs(
-  environment: Record<string, unknown>,
   services: Record<string, Record<string, unknown>>,
   serviceDirectories: DerivedReplaySpec['serviceDirectories'],
   input: ReplayDerivationInput,
   commands: ReplayCommandSummary[]
 ): Promise<string[]> {
-  void environment;
   const added: string[] = [];
   const roots = new Map<string, string[]>();
   for (const entry of serviceDirectories) {
@@ -374,7 +372,8 @@ export function parseDotenv(text: string): Array<[string, string]> {
   return pairs;
 }
 
-function collectSecretIds(value: unknown, found = new Set<string>()): Set<string> {
+/** Every `{ secret: id }` reference in a spec. */
+export function collectSecretIds(value: unknown, found = new Set<string>()): Set<string> {
   if (!value || typeof value !== 'object') return found;
   if (Array.isArray(value)) {
     for (const item of value) collectSecretIds(item, found);
@@ -392,23 +391,12 @@ function templateDigest(spec: PreviewSpec, input: ReplayDerivationInput): string
     if (typeof value !== 'string') return value;
     return value.split(input.exportRoot).join('<export>').split(input.ceiling).join('<ceiling>').split(input.runName).join('<name>');
   });
-  return createHash('sha256').update(stableJson(JSON.parse(text))).digest('hex');
+  return createHash('sha256').update(canonicalJson(JSON.parse(text))).digest('hex');
 }
 
 /** The template with what the lease sheet states beside it: the env files and every outside host. */
 function approvalDigest(template: string, envFiles: string[], hosts: string[]): string {
-  return createHash('sha256').update(stableJson({ template, envFiles: [...envFiles].sort(), hosts })).digest('hex');
-}
-
-export function stableJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
-    .filter((key) => record[key] !== undefined)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
-    .join(',')}}`;
+  return createHash('sha256').update(canonicalJson({ template, envFiles: [...envFiles].sort(), hosts })).digest('hex');
 }
 
 function relativeInside(value: string, root: string): string | undefined {

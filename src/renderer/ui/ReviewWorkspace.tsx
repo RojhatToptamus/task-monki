@@ -12,6 +12,7 @@ import { ReviewDiff } from './ReviewDiff';
 import { ReviewGuide } from './ReviewGuide';
 import { ReviewNavigator, type ReviewRail } from './ReviewNavigator';
 import { ReviewOutcome } from './ReviewRequest';
+import { PendingLabel } from './StableLabel';
 import { Elapsed } from './SessionTurns';
 import { Tooltip } from './Tooltip';
 import { useReviewKeys } from './useReviewKeys';
@@ -148,7 +149,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                     {/* A finished, current review can run again from beside its time. */}
                     {rerunSettled && run && (run.starting || !run.disabledReason) && !guideHoldsRun ? (
                       <Tooltip label={run.label}>
-                        <button type="button" className="tm-iconbtn" aria-label={run.label} disabled={run.busy} onClick={run.onRun}>
+                        <button type="button" className="tm-iconbtn" aria-label={run.label} disabled={run.busy} data-pending={run.starting || undefined} onClick={run.onRun}>
                           <RefreshCw size={16} aria-hidden="true" />
                         </button>
                       </Tooltip>
@@ -160,9 +161,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                           type="button"
                           className={model.stale ? 'primary-button button--sm' : 'outline-button button--sm'}
                           disabled={Boolean(run.disabledReason) || run.busy}
+                          data-pending={run.starting || undefined}
                           onClick={run.onRun}
                         >
-                          {run.starting ? 'Starting…' : run.label}
+                          <PendingLabel label={run.label} pendingLabel="Starting…" pending={Boolean(run.starting)} />
                         </button>
                       </span>
                     ) : null}

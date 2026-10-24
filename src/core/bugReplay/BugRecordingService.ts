@@ -18,7 +18,7 @@ import type {
 } from '../../shared/bugReplay';
 import { DEFAULT_BUG_CASE_ENVIRONMENT } from '../../shared/bugReplay';
 import { serviceStoppedSentence } from '../../shared/bugReplayClaims';
-import { compileBugCase, describeCapture, numbersIn, suggestValue, BUG_CASE_COMPILER_VERSION } from './BugCaseCompiler';
+import { compileBugCase, describeCapture, numbersIn, suggestValue } from './BugCaseCompiler';
 import type { BugRecordingSessions, BugReplayCore, PendingReplayApproval } from './BugReplayPorts';
 import { ceilingFor, versionDigest } from './BugReplayIdentity';
 import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, BugReplayFileRecord, StoredBugReplayRun } from './BugReplayRecords';
@@ -104,6 +104,8 @@ interface RecordingSession {
   idleTimer?: NodeJS.Timeout;
   lengthTimer?: NodeJS.Timeout;
   watchTimer?: NodeJS.Timeout;
+  /** A limit, or the page or app stopping, while the person marked: going back to recording stops there. */
+  stopReason?: string;
   partial?: string;
   launching?: Promise<void>;
   /** Another start page is opening; the start step moves once it has. */
@@ -260,10 +262,6 @@ export class BugRecordingService implements BugRecordingSessions {
     if (this.session) await this.dispose(this.session, 'DISCARDED');
   }
 
-  forgetTask(taskId: string): void {
-    void taskId;
-  }
-
   async reload(sessionId: string): Promise<void> {
     const session = this.requireSession(sessionId);
     if (session.phase !== 'RECORDING' || !session.view) return;
@@ -381,10 +379,9 @@ export class BugRecordingService implements BugRecordingSessions {
   }
 
   /** Back to recording; the marked window is dropped and Mark seals a new one. */
-  async returnToRecording(sessionId: string, draft?: BugCaptureDraft): Promise<void> {
+  async returnToRecording(sessionId: string): Promise<void> {
     const session = this.requireSession(sessionId);
     if (session.phase !== 'MARKING' || !session.view) return;
-    void draft;
     const recorder = session.view.recorder;
     // Recording again first: a preview that lands while the page clears finds no capture, so no
     // outline comes back to be recorded or caught in the next mark's screenshot.
@@ -393,6 +390,10 @@ export class BugRecordingService implements BugRecordingSessions {
     this.setPhase(session, 'RECORDING');
     await recorder.cancelPick();
     await recorder.showMarks([]);
+    this.armIdle(session);
+    const stopped = session.stopReason;
+    session.stopReason = undefined;
+    if (stopped) await this.interrupt(session, stopped);
   }
 
   preview(sessionId: string, draft: BugCaptureDraft): BugCapturePreview {
@@ -410,7 +411,7 @@ export class BugRecordingService implements BugRecordingSessions {
       reproducible: compiled.reproducible,
       ...(compiled.reason ? { reason: compiled.reason } : {}),
       checks: compiled.checks,
-      valueRows: suggestedValueRows(session.capture.log, session.capture.pageTitle, draft)
+      valueRows: suggestedValueRows(session.capture.log, draft)
     };
   }
 
@@ -452,7 +453,7 @@ export class BugRecordingService implements BugRecordingSessions {
       const screenshots = capture.screenshot.length > 0 && capture.screenshot.length <= BUG_REPLAY_FILE_LIMITS.SCREENSHOT
         ? [await publish('SCREENSHOT', 'image/png', capture.screenshot)]
         : [];
-      const described = describeCapture(capture.log, capture.pageTitle);
+      const described = describeCapture(capture.log);
       const now = new Date().toISOString();
       const envFiles = session.included.map((file) => ({ relativePath: file.relativePath, sha256: sha256(file.bytes) }));
       const captureRecord: BugCaptureRecord = {
@@ -514,7 +515,6 @@ export class BugRecordingService implements BugRecordingSessions {
           sharedSetup: protectedPlan.sharedSetup,
           envFiles,
           baselineTreeId: treeId,
-          toolchain: `${this.replay.toolchain()} ${BUG_CASE_COMPILER_VERSION}`,
           createdAt: now
         };
         version = { ...draftVersion, digest: versionDigest(draftVersion) };
@@ -756,7 +756,7 @@ export class BugRecordingService implements BugRecordingSessions {
   }
 
   private async watchEnvironment(session: RecordingSession): Promise<void> {
-    if (this.session !== session || session.phase !== 'RECORDING' || !session.environment) return;
+    if (this.session !== session || !['RECORDING', 'MARKING'].includes(session.phase) || session.stopReason || !session.environment) return;
     const bracket = await this.replay.environment.bracket(session.run.name, session.environment.attemptId);
     if (!bracket.ok) await this.interrupt(session, serviceStoppedSentence(bracket.service));
   }
@@ -766,7 +766,13 @@ export class BugRecordingService implements BugRecordingSessions {
    * evidence. `reason` is a sentence of its own: "The app service stopped".
    */
   private async interrupt(session: RecordingSession, reason: string): Promise<void> {
-    if (this.session !== session || session.phase !== 'RECORDING' || !session.view) return;
+    if (this.session !== session) return;
+    // What was marked stays markable and savable; going back to recording stops there.
+    if (session.phase === 'MARKING' || session.phase === 'SAVING') {
+      session.stopReason ??= reason;
+      return;
+    }
+    if (session.phase !== 'RECORDING' || !session.view) return;
     const recorder = session.view.recorder;
     const incomplete = `Recording stopped early: ${reason.charAt(0).toLowerCase()}${reason.slice(1)}`;
     recorder.markIncomplete(incomplete);
@@ -856,7 +862,7 @@ export class BugRecordingService implements BugRecordingSessions {
 
   private captureView(session: RecordingSession): BugCaptureView {
     const capture = session.capture!;
-    const described = describeCapture(capture.log, capture.pageTitle);
+    const described = describeCapture(capture.log);
     const view: BugCaptureView = {
       draftRevision: capture.draftRevision,
       picks: described.picks,
@@ -963,8 +969,11 @@ function failureFor(error: unknown): NonNullable<BugRecordingSessionView['failur
   return { title: "Recording couldn't start", detail: message.split('\n')[0].slice(0, 300), action: 'retry' };
 }
 
-/** Ignored `.env*` files in the directories the recipe runs code in; the person chooses which a clean copy gets. */
-async function ignoredEnvFiles(worktreePath: string, recipeText: string): Promise<BugRecordingEnvFileChoice[]> {
+/**
+ * Ignored `.env*` files in the directories the recipe runs code in; the person chooses which a
+ * clean copy gets. A file Git tracks comes with the code, so it is never offered.
+ */
+export async function ignoredEnvFiles(worktreePath: string, recipeText: string): Promise<BugRecordingEnvFileChoice[]> {
   const directories = new Set<string>(['.']);
   try {
     const spec = parseConfigurationFile(recipeText);
@@ -990,7 +999,7 @@ async function ignoredEnvFiles(worktreePath: string, recipeText: string): Promis
     }
   }
   if (candidates.length === 0) return [];
-  const ignored = await git(worktreePath, ['check-ignore', '--no-index', ...candidates], 15_000).catch((error: { stdout?: string }) => error.stdout ?? '');
+  const ignored = await git(worktreePath, ['check-ignore', ...candidates], 15_000).catch((error: { stdout?: string }) => error.stdout ?? '');
   const ignoredSet = new Set(String(ignored).split('\n').map((line) => line.trim()).filter(Boolean));
   return candidates
     .filter((file) => ignoredSet.has(file))
@@ -1002,8 +1011,8 @@ async function ignoredEnvFiles(worktreePath: string, recipeText: string): Promis
  * The capture's value rows, each with the value the person's expectation implies in the
  * observed representation: a picked "$40.00" expected as "$45.00" suggests 45 for a JSON 40.
  */
-function suggestedValueRows(log: BugRecordingLogV1, pageTitle: string, draft: BugCaptureDraft): BugCaptureValueRow[] {
-  return describeCapture(log, pageTitle).valueRows.map((row) => {
+function suggestedValueRows(log: BugRecordingLogV1, draft: BugCaptureDraft): BugCaptureValueRow[] {
+  return describeCapture(log).valueRows.map((row) => {
     let observed: number;
     try {
       observed = Number(JSON.parse(row.observed));

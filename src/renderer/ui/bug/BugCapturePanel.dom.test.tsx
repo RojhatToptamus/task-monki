@@ -124,6 +124,36 @@ describe('Marking a bug', () => {
     });
   });
 
+  it('says why a stopped recording cannot be saved yet, and not again what stopped it', async () => {
+    const stopped = { ...capture([], 1), partial: 'Recording stopped early: the app service stopped' };
+    render(<BugCapturePanel taskId="task-1" recording={{ ...recording, phase: 'INTERRUPTED' }} capture={stopped} picking={false} onError={vi.fn()} onSaved={vi.fn()} />);
+    await settle();
+    const save = screen.getByRole('button', { name: 'Save steps only' }) as HTMLButtonElement;
+    const description = () => document.getElementById(save.getAttribute('aria-describedby') ?? '')?.textContent;
+
+    expect(save.disabled).toBe(true);
+    expect(description()).toBe('Name the bug first');
+
+    fireEvent.change(nameField(), { target: { value: 'Checkout stops' } });
+    expect(save.disabled).toBe(false);
+    // What stopped the recording is said where the page was.
+    expect(save.getAttribute('aria-describedby')).toBeNull();
+  });
+
+  it('never lets a request row empty itself: Sent once stays while the status is Any', async () => {
+    const write = {
+      key: 'POST primary /api/cart', method: 'POST', role: 'primary', pathTemplate: '/api/cart', path: '/api/cart', queryKeys: [],
+      observed: '200', count: 2, succeeded: true, write: true, defaultCheck: 'none' as const, defaultSentOnce: true
+    };
+    render(panel({ ...capture([pick(0, 'Cart total', '$40.00')], 1), requests: [write] }));
+    await settle();
+
+    expect((screen.getByRole('combobox', { name: 'Expectation on POST /api/cart' }) as HTMLSelectElement).value).toBe('none');
+    // Unticking it would leave the row with no expectation; the row goes with its × instead.
+    expect((screen.getByRole('checkbox', { name: 'Sent once' }) as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Remove the expectations on POST /api/cart' })).toBeTruthy();
+  });
+
   it('moves focus to Stop pointing when pointing starts, and back to Add expectation when it stops', async () => {
     const view = capture([pick(0, 'Cart total', '$40.00')], 1);
     const pointRef = createRef<HTMLButtonElement>();

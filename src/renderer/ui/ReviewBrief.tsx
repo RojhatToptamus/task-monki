@@ -3,7 +3,6 @@ import { ChevronRight } from 'lucide-react';
 import type { ReviewRequestItem, ReviewRequestRecord, ReviewResponseAnswer, TaskCommit } from '../../shared/contracts';
 import { shortSha } from '../model/formatting';
 import { formatShortAge } from '../model/timeAgo';
-import type { Tone } from '../model/viewTypes';
 import { ReviewAnswers } from './ReviewRound';
 import { useClampOverflow } from './useClampOverflow';
 
@@ -11,7 +10,7 @@ export interface ReviewBriefContent {
   /** The task as asked. */
   asked?: string;
   /** What Task Monki observed of the task's recorded bug, before and after the change. */
-  behaviour?: { word: string; tone: Tone; lines: string[] };
+  behaviour?: { word: string; lines: string[] };
   /** What the implementation agent reported: a claim, quoted. */
   report?: { author: string; text: string };
   /** The reviewer's summary, quoted; the author names the runtime and model, one fact each. */

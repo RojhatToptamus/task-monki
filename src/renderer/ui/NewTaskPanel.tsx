@@ -796,7 +796,7 @@ export function NewTaskPanel({
       className={`tm-modal--top newtask-modal${isClosing ? ' newtask-modal--closing' : ''}`}
       role="presentation"
       pending={isSubmitting}
-      onDismiss={isSubmitting ? undefined : closePanel}
+      onDismiss={closePanel}
     >
       <form
         id="new-task-panel-content"

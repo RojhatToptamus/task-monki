@@ -15,7 +15,7 @@ const BUG_INPUTS = new Set(['bugReplay.updated', 'task.updated', 'worktree.updat
  * task says something changed; bursts of updates are read once, and a read still in flight
  * when the task changes is dropped.
  */
-export function useBugReplay(taskId: string | undefined, enabled = true): {
+export function useBugReplay(taskId: string | undefined): {
   snapshot?: BugReplaySnapshot;
   error?: string;
   refresh(): void;
@@ -24,7 +24,7 @@ export function useBugReplay(taskId: string | undefined, enabled = true): {
   const readRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
-    if (!taskId || !enabled) return;
+    if (!taskId) return;
     let disposed = false;
     let reading = false;
     let again = false;
@@ -68,7 +68,7 @@ export function useBugReplay(taskId: string | undefined, enabled = true): {
       if (timer) clearTimeout(timer);
       unsubscribe();
     };
-  }, [taskId, enabled]);
+  }, [taskId]);
 
   const refresh = useCallback(() => readRef.current(), []);
   const current = state.taskId === taskId ? state : {};

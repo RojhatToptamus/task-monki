@@ -221,16 +221,6 @@ export class ReplayEnvironment {
     }
   }
 
-  /** Reads new log text since `cursor`, bounded; logs are diagnostics only and never read by a verdict. */
-  async logs(name: string, attemptId: string, cursor: number): Promise<{ text: string; cursor: number; truncated: boolean } | undefined> {
-    try {
-      const result = await this.runtime().logs(name, attemptId, { after: cursor, maxBytes: 64 * 1024 });
-      return { text: result.text, cursor: result.cursor, truncated: result.truncated };
-    } catch {
-      return undefined;
-    }
-  }
-
   /**
    * Stops the name, deletes its managed data and forgets it. Returns the reason cleanup could not
    * finish, so the run can record cleanup debt and retry later.

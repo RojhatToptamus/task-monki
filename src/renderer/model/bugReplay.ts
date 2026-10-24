@@ -22,6 +22,7 @@ import type {
   BugStepView
 } from '../../shared/bugReplay';
 import { bugCountParts, bugReason, bugStateWord, suggestBugTitle } from '../../shared/bugReplayClaims';
+import { formatClock } from './timeAgo';
 import type { Tone } from './viewTypes';
 
 /**
@@ -53,8 +54,6 @@ export interface BugStatus {
   tone: Tone;
   /** Work in flight: Reproducing, Verifying, Fixing the bug. */
   inFlight: boolean;
-  /** The person owes a step. */
-  owed: boolean;
 }
 
 export function describeBugStatus(gate: BugGate): BugStatus {
@@ -62,8 +61,7 @@ export function describeBugStatus(gate: BugGate): BugStatus {
   return {
     word: word.word,
     tone: word.tone === 'working' ? 'info' : word.tone,
-    inFlight: word.tone === 'working',
-    owed: word.owed
+    inFlight: word.tone === 'working'
   };
 }
 
@@ -132,7 +130,7 @@ export function bugActionLabel(action: BugCaseAction, view?: Pick<BugCaseView, '
 }
 
 /** What an action's control says while it runs. */
-export function bugActionPendingLabel(action: BugCaseAction): string {
+export function bugActionPendingLabel(action: BugCaseAction, view?: Parameters<typeof bugActionLabel>[1]): string {
   switch (action) {
     case 'send-to-agent':
       return 'Sending…';
@@ -147,13 +145,15 @@ export function bugActionPendingLabel(action: BugCaseAction): string {
     case 'cancel-run':
       return 'Canceling…';
     default:
-      return bugActionLabel(action);
+      return bugActionLabel(action, view);
   }
 }
 
 export interface BugActionLayout {
   primary?: BugCaseAction;
   secondary: BugCaseAction[];
+  /** Declining an approval, which goes first as every approval's decline does. */
+  decline?: BugCaseAction;
   menu: BugCaseAction[];
 }
 
@@ -182,13 +182,16 @@ const APPROVAL_BUTTONS: BugCaseAction[] = ['allow-runs', 'always-allow-runs', 'c
 /** The actions as buttons and a menu: a decision the bug waits on leads, then the state's own. */
 export function layoutBugActions(actions: BugCaseAction[], state: BugReplayGateState): BugActionLayout {
   const offered = new Set(actions);
-  const buttons = offered.has('allow-runs')
+  const approval = offered.has('allow-runs');
+  const buttons = approval
     ? APPROVAL_BUTTONS.filter((action) => offered.has(action))
     : [...(offered.has('unlock-secrets') ? ['unlock-secrets' as const] : []), ...STATE_BUTTONS[state].filter((action) => offered.has(action))].slice(0, 3);
   const shown = new Set<BugCaseAction>(buttons);
+  const decline = approval && offered.has('cancel-run') ? 'cancel-run' : undefined;
   return {
     ...(buttons[0] ? { primary: buttons[0] } : {}),
-    secondary: buttons.slice(1),
+    secondary: buttons.slice(1).filter((action) => action !== decline),
+    ...(decline ? { decline } : {}),
     menu: actions.filter((action) => !shown.has(action))
   };
 }
@@ -248,7 +251,6 @@ export interface BugRunRow {
   at: string;
   /** How long it ran, once it settled. */
   durationMs?: number;
-  screenshotFileIds: string[];
 }
 
 /** The replays a bug lists, newest first; one that checked earlier expectations keeps its word but no tone. */
@@ -280,21 +282,12 @@ export function bugRunRows(runs: BugReplayRunView[], currentVersionId?: string):
         inFlight: !settled && !run.waitingFor,
         ...(run.failure?.detail && run.outcome !== 'CANCELED' && run.outcome !== 'SUPERSEDED' ? { detail: run.failure.detail } : {}),
         at: run.settledAt ?? run.startedAt ?? run.queuedAt,
-        ...(Number.isFinite(started) && Number.isFinite(ended) && ended >= started ? { durationMs: ended - started } : {}),
-        screenshotFileIds: run.screenshotFileIds
+        ...(Number.isFinite(started) && Number.isFinite(ended) && ended >= started ? { durationMs: ended - started } : {})
       };
     });
 }
 
 /** A duration in the app's words: "14 s", "2 min 5 s". */
-export function formatDuration(ms: number): string {
-  const seconds = Math.max(0, Math.round(ms / 1000));
-  if (seconds < 60) return `${seconds} s`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return rest ? `${minutes} min ${rest} s` : `${minutes} min`;
-}
-
 /** The Replays disclosure's summary: what the replays support, one polarity per side. */
 export function bugReplaysSummary(gate: Pick<BugReplayGateProjection, 'baseline' | 'candidate' | 'state'>): string[] {
   const parts = bugCountParts(gate);
@@ -465,37 +458,26 @@ export function displayedBugVerdict(gate: BugReplayGateProjection | undefined): 
 
 // Recording
 
-export interface RecordingHead {
-  /** The toolbar's state, in one phrase. */
-  title: string;
-  tone: Tone;
-  working: boolean;
-  /** Live detail beside it: the step of preparation, or the page being recorded. */
-  detail?: string;
-  detailMono?: boolean;
-}
 
-export function recordingHead(recording: BugRecordingSessionView): RecordingHead {
+export function recordingTitle(recording: BugRecordingSessionView): string {
   switch (recording.phase) {
     case 'CHECKING':
     case 'STARTING':
-      return { title: 'Starting the app', tone: 'neutral', working: true };
+      return 'Starting the app';
     case 'CHOOSING_ENV_FILES':
     case 'NEEDS_APPROVAL':
     case 'FAILED':
-      // The card in the page's place carries the step, or what went wrong, and its tone.
-      return { title: 'Record a bug', tone: 'neutral', working: false };
+      // The card in the page's place carries the step, or what went wrong.
+      return 'Record a bug';
     case 'INTERRUPTED':
       // The notice beside the steps says why; the composer's foot holds the choices.
-      return { title: 'Recording stopped', tone: 'neutral', working: false };
+      return 'Recording stopped';
     case 'RECORDING':
-      return { title: 'Recording', tone: 'neutral', working: false };
+      return 'Recording';
     case 'MARKING':
-      return recording.detail
-        ? { title: "Point at what's wrong", tone: 'neutral', working: false }
-        : { title: 'Mark the bug', tone: 'neutral', working: false };
+      return recording.detail ? "Point at what's wrong" : 'Mark the bug';
     case 'SAVING':
-      return { title: 'Saving the bug', tone: 'neutral', working: true };
+      return 'Saving the bug';
   }
 }
 
@@ -509,15 +491,10 @@ export function recordingViewVisible(phase: BugRecordingPhase): boolean {
   return phase === 'RECORDING' || phase === 'MARKING' || phase === 'SAVING';
 }
 
-/** Elapsed time as m:ss or h:mm:ss, in tabular figures. */
-export function formatElapsed(fromIso: string | undefined, now: number): string | undefined {
+/** The clock since an ISO time: m:ss or h:mm:ss, in tabular figures. */
+export function clockSince(fromIso: string | undefined, now: number): string | undefined {
   const start = fromIso ? Date.parse(fromIso) : NaN;
-  if (!Number.isFinite(start)) return undefined;
-  const total = Math.max(0, Math.floor((now - start) / 1000));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const seconds = String(total % 60).padStart(2, '0');
-  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`;
+  return Number.isFinite(start) ? formatClock(now - start) : undefined;
 }
 
 /** The largest box of the case's 16:10 viewport that fits the space, never larger than the viewport. */
@@ -624,10 +601,9 @@ export const CHECK_TEMPLATE_OPTIONS: Array<{ value: BugCaptureCheckDraft['templa
  * The Review brief's Bug block: the bug's word and what was observed before and after the fix.
  * What the replays could not see is stated where a replay is opened, not beside the diff.
  */
-export function reviewBehaviour(view: BugCaseView | undefined): { word: string; tone: Tone; lines: string[] } | undefined {
+export function reviewBehaviour(view: BugCaseView | undefined): { word: string; lines: string[] } | undefined {
   if (!view?.version) return undefined;
   const lines = [...(view.before ?? []), ...(view.after ?? [])];
   if (lines.length === 0) return undefined;
-  const status = describeBugStatus(view.gate);
-  return { word: status.word, tone: status.tone, lines };
+  return { word: describeBugStatus(view.gate).word, lines };
 }

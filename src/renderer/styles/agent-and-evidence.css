@@ -183,19 +183,6 @@
   font: var(--w-regular) var(--t-meta)/var(--lh-meta) var(--font-ui);
 }
 
-/* The inline notice (DESIGN.md 10), in the waiting tone. */
-.provider-warning,
-.provider-label-warning,
-.subagent-hierarchy__warning,
-.subagent-node__problem {
-  padding: 8px 12px;
-  border-radius: var(--r-sm);
-  background: var(--waiting-bg);
-  color: var(--waiting-ink);
-  font-size: var(--t-help);
-  line-height: var(--lh-ui);
-}
-
 /* A short list of settings: the table container, its ring drawn over the rows. */
 .settings-table {
   position: relative;
@@ -813,10 +800,6 @@
 
 .subagent-hierarchy__warning {
   margin: 0 0 12px;
-}
-
-.subagent-node__problem {
-  margin: 0;
 }
 
 .subagent-tree,

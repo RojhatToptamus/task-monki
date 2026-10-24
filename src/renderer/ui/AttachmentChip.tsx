@@ -1,12 +1,12 @@
 import { FileText, Image, X } from 'lucide-react';
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useId, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { AttachmentComposerItem } from '../model/taskAttachmentComposer';
 import type { AttachmentContent, AttachmentDescriptor } from '../../shared/attachments';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { ModalFrame } from './ModalFrame';
-import { Presence, useLeaving } from './presence';
+import { Presence, useOpenReport } from './presence';
 
 export function AttachmentChip({
   item,
@@ -152,13 +152,7 @@ function AttachmentPreviewDialog({ name, onClose, onOpenChange, children }: {
 }) {
   const ref = useRef<HTMLElement>(null);
   const titleId = useId();
-  // Closed as soon as it starts to leave, so what opened it takes its keys back at once.
-  const leaving = useLeaving();
-  useLayoutEffect(() => {
-    if (leaving) return undefined;
-    onOpenChange?.(true);
-    return () => onOpenChange?.(false);
-  }, [leaving, onOpenChange]);
+  useOpenReport(onOpenChange);
   useDialogFocusBoundary({ dialogRef: ref, busy: false, onClose });
   return createPortal(<ModalFrame labelledBy={titleId} onDismiss={onClose}>
     <section ref={ref} tabIndex={-1} className="tm-modal__panel task-attachment-preview">

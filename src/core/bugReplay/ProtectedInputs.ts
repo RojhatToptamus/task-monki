@@ -33,7 +33,13 @@ const CODE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '
 const LIFECYCLE_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepare'];
 const MAX_PINNED_CLOSURE = 200;
 
-export async function planProtectedInputs(jobs: RecipeJob[], tree: ReplayTreeReader): Promise<ProtectedInputPlan> {
+/** A frozen tree as protected inputs read it: its files, their text and git's own blob ids. */
+export interface ProtectedTree extends ReplayTreeReader {
+  /** Git's blob id of each path that is a file in the tree, whatever its size or content. */
+  blobs(paths: readonly string[]): Promise<Map<string, string>>;
+}
+
+export async function planProtectedInputs(jobs: RecipeJob[], tree: ProtectedTree): Promise<ProtectedInputPlan> {
   const files = new Set(tree.files);
   const filePins = new Set<string>();
   const memberPins = new Map<string, { path: string; pointer: string }>();
@@ -176,7 +182,7 @@ export async function planProtectedInputs(jobs: RecipeJob[], tree: ReplayTreeRea
   }
 
   const pins: BugReplayProtectedInput[] = [];
-  const entries = await blobEntries([...filePins], tree);
+  const entries = await tree.blobs([...filePins]);
   for (const file of [...filePins].sort()) {
     const blob = entries.get(file);
     if (blob) pins.push({ kind: 'file', path: file, blob });
@@ -189,10 +195,10 @@ export async function planProtectedInputs(jobs: RecipeJob[], tree: ReplayTreeRea
 }
 
 /** Pins whose input differs in `tree`, as paths in the product's words. */
-export async function changedProtectedInputs(pins: BugReplayProtectedInput[], tree: ReplayTreeReader): Promise<string[]> {
+export async function changedProtectedInputs(pins: BugReplayProtectedInput[], tree: ProtectedTree): Promise<string[]> {
   const changed = new Set<string>();
   const filePins = pins.filter((pin): pin is Extract<BugReplayProtectedInput, { kind: 'file' }> => pin.kind === 'file');
-  const entries = await blobEntries(filePins.map((pin) => pin.path), tree);
+  const entries = await tree.blobs(filePins.map((pin) => pin.path));
   for (const pin of filePins) if (entries.get(pin.path) !== pin.blob) changed.add(pin.path);
   for (const pin of pins) {
     if (pin.kind === 'jsonMember') {
@@ -213,27 +219,6 @@ export async function changedProtectedInputs(pins: BugReplayProtectedInput[], tr
  */
 export function isEnvFileName(name: string): boolean {
   return /^\.env(?:\.[\w.-]+)?$/.test(name) && !/\.(?:example|sample|template)$/.test(name);
-}
-
-/** Files under migration and schema directories that differ between two trees. */
-export function schemaPaths(files: readonly string[]): string[] {
-  return files.filter((file) => /(?:^|\/)(?:migrations?|migrate|prisma\/schema\.prisma|schema\.prisma|db\/schema\.rb|drizzle)(?:\/|$)/.test(file));
-}
-
-async function blobEntries(paths: string[], tree: ReplayTreeReader): Promise<Map<string, string>> {
-  const result = new Map<string, string>();
-  for (const file of paths) {
-    const text = await tree.readText(file);
-    if (text === undefined) continue;
-    result.set(file, gitBlobId(text));
-  }
-  return result;
-}
-
-/** Git's blob id for UTF-8 text, so pins compare the same way `git ls-tree` would. */
-export function gitBlobId(text: string): string {
-  const bytes = Buffer.from(text, 'utf8');
-  return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
 }
 
 async function memberDigest(tree: ReplayTreeReader, manifestPath: string, pointer: string): Promise<string | null> {

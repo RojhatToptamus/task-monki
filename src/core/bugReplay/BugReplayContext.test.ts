@@ -34,7 +34,6 @@ function verifiedRecords(overrides: { observedTreeId?: string; document?: Return
   ]);
   const gate = computeGate({
     bugCase,
-    state: { observedTreeId: bugCase.observedTreeId },
     versions: [version],
     decisions: [{ id: 'd1', caseId: bugCase.id, taskId: bugCase.taskId, kind: 'APPROVED', versionId: version.id, createdAt: version.createdAt }],
     runs,

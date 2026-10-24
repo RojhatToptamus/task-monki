@@ -21,9 +21,9 @@ export function ModalFrame({
   describedBy?: string;
   /** `presentation` when the panel itself is the dialog. */
   role?: 'dialog' | 'presentation';
-  /** The modal's action is running: its controls keep their look through the pending delay (§6.1). */
+  /** The modal's action is running: its controls keep their look through the pending delay (§6.1), and a stray click on the scrim cannot close it. */
   pending?: boolean;
-  /** A click on the scrim. Omit it while the action runs, so a stray click cannot close the modal. */
+  /** A click on the scrim, while no action runs. */
   onDismiss?: () => void;
   children: ReactNode;
 }) {
@@ -38,7 +38,7 @@ export function ModalFrame({
       aria-describedby={describedBy}
       data-pending={pending || undefined}
     >
-      <div className="tm-modal__scrim" onClick={onDismiss} />
+      <div className="tm-modal__scrim" onClick={pending ? undefined : onDismiss} />
       {children}
     </div>
   );

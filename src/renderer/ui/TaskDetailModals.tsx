@@ -61,7 +61,7 @@ export function ExistingWorkModal({
     }
   };
   return (
-    <ModalFrame labelledBy="existing-work-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
+    <ModalFrame labelledBy="existing-work-title" pending={busy} onDismiss={onCancel}>
       <form ref={panelRef} className="tm-modal__panel" tabIndex={-1} onSubmit={(event) => void submit(event)}>
         <h3 id="existing-work-title">{label}</h3>
         <div>
@@ -158,7 +158,7 @@ export function CreateDraftPrModal({
   };
 
   return (
-    <ModalFrame labelledBy="draft-pr-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
+    <ModalFrame labelledBy="draft-pr-title" pending={busy} onDismiss={onCancel}>
       <form
         ref={panelRef}
         className="tm-modal__panel tm-draftpr-modal"
@@ -259,7 +259,7 @@ export function MarkDoneModal({
     onClose: onCancel
   });
   return (
-    <ModalFrame labelledBy="mark-done-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
+    <ModalFrame labelledBy="mark-done-title" pending={busy} onDismiss={onCancel}>
       <div ref={panelRef} className="tm-modal__panel" tabIndex={-1}>
         <h3 id="mark-done-title">{copy.title}</h3>
         <p>{copy.body}</p>

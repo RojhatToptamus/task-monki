@@ -1270,7 +1270,7 @@ function RenameDesignDialog({
     }
   };
   return (
-    <ModalFrame labelledBy="rename-design-title" pending={saving} onDismiss={saving ? undefined : onCancel}>
+    <ModalFrame labelledBy="rename-design-title" pending={saving} onDismiss={onCancel}>
       <form ref={dialogRef} className="tm-modal__panel tm-design-delete tm-design-rename" tabIndex={-1} onSubmit={(event) => void submit(event)}>
         <h3 id="rename-design-title">Rename Design</h3>
         <label className="field" htmlFor="rename-design-input">
@@ -1338,7 +1338,7 @@ function DeleteDesignDialog({
   };
 
   return (
-    <ModalFrame labelledBy="delete-design-title" pending={deleting} onDismiss={deleting ? undefined : onCancel}>
+    <ModalFrame labelledBy="delete-design-title" pending={deleting} onDismiss={onCancel}>
       <div ref={dialogRef} className="tm-modal__panel tm-design-delete" tabIndex={-1}>
         <h3 id="delete-design-title">Delete “{designTitle}”?</h3>
         {retainedWorkspace ? <>
