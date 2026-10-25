@@ -392,6 +392,8 @@ export function buildInitialRunPrompt(input: {
   readOnlyMode: boolean;
   instruction?: string;
   userContext?: string;
+  /** A recorded bug this turn fixes, already bounded and labelled by Bug Replay. */
+  bugBrief?: string;
 }): string {
   return [
     TASK_MONKI_CONTEXT_LINE,
@@ -420,7 +422,8 @@ export function buildInitialRunPrompt(input: {
     input.userContext ?? '',
     startsFromExistingWork(input.task, input.worktree) && input.instruction?.trim()
       ? `Task description:\n${taskGoal(input.task)}\n\nCurrent requested work:\n${input.instruction.trim()}`
-      : `Authoritative Task Monki goal:\n${taskGoal(input.task)}`
+      : `Authoritative Task Monki goal:\n${taskGoal(input.task)}`,
+    ...(input.bugBrief ? ['', input.bugBrief] : [])
   ].join('\n');
 }
 
@@ -548,6 +551,7 @@ export function buildContinuationPrompt(input: {
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
   userContext?: string;
+  bugBrief?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Continue unfinished work after run ${input.run.id}.`,
@@ -566,6 +570,7 @@ export function buildRetryPrompt(input: {
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
   userContext?: string;
+  bugBrief?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Retry the implementation after unsuccessful run ${input.run.id}.`,
@@ -587,6 +592,7 @@ function buildExistingWorktreePrompt(
     gitSnapshot: GitSnapshotRecord;
     instruction?: string;
     userContext?: string;
+    bugBrief?: string;
   },
   intent: {
     previousRunIntroduction: string;
@@ -624,7 +630,9 @@ function buildExistingWorktreePrompt(
     USER_DECISION_CONTEXT_RULE,
     input.userContext,
     instruction ? '' : undefined,
-    instruction ? `${intent.instructionLabel}:\n${instruction}` : undefined
+    instruction ? `${intent.instructionLabel}:\n${instruction}` : undefined,
+    input.bugBrief ? '' : undefined,
+    input.bugBrief
   ]
     .filter((line): line is string => line !== undefined)
     .join('\n');
@@ -691,6 +699,8 @@ export function buildAgentReviewPrompt(input: {
   target: import('./agent').AgentReviewTarget;
   userContext?: string;
   previousReview?: PreviousReviewContext;
+  /** What Task Monki observed about the task's recorded bug, for the reviewer. */
+  bugSection?: string;
   /** The change the review reads, one line per file. With it, the review also writes the walkthrough. */
   changeIndex?: string;
 }): string {
@@ -719,6 +729,7 @@ export function buildAgentReviewPrompt(input: {
     'Do not commit, push, merge, or change repository settings.',
     'Reinspect the repository and Git state directly. Provider output is review telemetry; Task Monki verifies the diff independently.',
     ...previousReviewSection(input.previousReview),
+    ...(input.bugSection ? ['', input.bugSection] : []),
     ...(input.changeIndex
       ? [
           '',

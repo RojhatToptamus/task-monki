@@ -5,6 +5,7 @@ import {
   type SaveAgentProfileRequest
 } from '../../shared/agentProfiles';
 import { AGENT_PROFILE_STARTERS } from '../model/agentProfileStarters';
+import { PendingLabel } from './StableLabel';
 
 export interface AgentProfilesSettingsActions {
   onSaveAgentProfile(input: SaveAgentProfileRequest): Promise<void>;
@@ -22,6 +23,7 @@ export function AgentProfilesSettings({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [deleting, setDeleting] = useState(false);
+  const instructionId = useId();
   const instructionHelpId = useId();
   const edit = (next: SaveAgentProfileRequest | undefined) => {
     setDraft(next);
@@ -84,7 +86,7 @@ export function AgentProfilesSettings({
         ) : null}
       </header>
       {draft ? (
-        <form className="tm-profile-editor" onSubmit={(event) => void save(event)}>
+        <form className="tm-profile-editor" data-pending={busy || undefined} onSubmit={(event) => void save(event)}>
           {!draft.id ? (
             <label className="field">
               <span>Start from</span>
@@ -124,9 +126,11 @@ export function AgentProfilesSettings({
               onChange={(event) => setDraft({ ...draft, description: event.target.value })}
             />
           </label>
-          <label className="field">
-            <span>Instructions</span>
+          {/* The help is the field's own, under it, and not part of its name. */}
+          <div className="field">
+            <label className="field__label" htmlFor={instructionId}>Instructions</label>
             <textarea
+              id={instructionId}
               required
               aria-describedby={instructionHelpId}
               rows={10}
@@ -134,12 +138,12 @@ export function AgentProfilesSettings({
               disabled={busy}
               onChange={(event) => setDraft({ ...draft, instructions: event.target.value })}
             />
-          </label>
-          <small id={instructionHelpId}>
-            Describe working methods, checks, and useful outputs. Up to 16 KB.
-          </small>
+            <small id={instructionHelpId}>
+              Describe working methods, checks, and useful outputs. Up to 16 KB.
+            </small>
+          </div>
           {error ? (
-            <p role="alert" className="form-warning">
+            <p role="alert" className="tm-notice">
               {error}
             </p>
           ) : null}
@@ -195,7 +199,7 @@ export function AgentProfilesSettings({
               className="primary-button"
               disabled={busy || !draft.name.trim() || !draft.instructions.trim()}
             >
-              {busy ? 'Saving…' : 'Save profile'}
+              <PendingLabel label="Save profile" pendingLabel="Saving…" pending={busy} />
             </button>
           </div>
         </form>

@@ -13,6 +13,7 @@ import { DisclosureChevron } from './DisclosureChevron';
 import { reviewedCode, reviewedCodeText, type ReviewedCode } from '../model/reviewedCode';
 import type { Tone } from '../model/viewTypes';
 import { ReportedQuote } from './ReportedQuote';
+import { PendingLabel } from './StableLabel';
 
 export type ReviewActionPauseReason =
   | 'review-starting'
@@ -207,14 +208,15 @@ function RawReviewOutput({
               type="button"
               className="outline-button"
               disabled={loading}
+              data-pending={loading || undefined}
               onClick={onLoad}
             >
-              {loading ? 'Loading review artifact…' : 'Load available review artifact'}
+              <PendingLabel label="Load available review artifact" pendingLabel="Loading review artifact…" pending={loading} />
             </button>
           ) : textExcerpt.availableContent.kind === 'NOT_AVAILABLE' ? (
             <p>Additional content is not available from retained evidence.</p>
           ) : null}
-          {error ? <div className="tm-error">{error}</div> : null}
+          {error ? <div className="tm-notice">{error}</div> : null}
         </div>
       ) : null}
     </details>

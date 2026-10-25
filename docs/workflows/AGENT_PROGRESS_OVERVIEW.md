@@ -145,7 +145,7 @@ offers cancellation through the existing Design turn operation. Agent retains it
 own edit, remove, and held-instruction controls.
 The action row uses shared controls with accessible labels and tooltips.
 Its delivery menu distinguishes an active-run message from an after-response queue.
-Agent, Design, and Discourse action menus use Radix (the shadcn foundation) for
+Agent, Design, and Discourse action menus use Radix for
 portals, viewport collision handling, dismissal, and keyboard navigation.
 Pending Agent instructions can be edited or removed until claimed. Editing uses the same text field
 while keeping the unsent draft separate. Cmd/Ctrl+Enter saves an edit; Escape cancels

@@ -14,6 +14,7 @@ interface TaskActionsMenuProps {
   onRequestDelete(taskId: string): void;
   /** On the task page: opens the raw run, event and provider records. */
   onOpenDebug?(): void;
+  onOpenChange?(open: boolean): void;
   className?: string;
   align?: 'start' | 'end';
 }
@@ -27,10 +28,16 @@ export function TaskActionsMenu({
   onArchive,
   onRequestDelete,
   onOpenDebug,
+  onOpenChange,
   className = '',
   align = 'end'
 }: TaskActionsMenuProps) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpenState] = useState(false);
+  // A native view over the page (a recording) steps aside while the menu is open.
+  const setOpen = (next: boolean) => {
+    setOpenState(next);
+    onOpenChange?.(next);
+  };
   const notify = useNotify();
   const openTargetItems = useOpenTargetMenuItems(openTarget, open, (message) => notify(message, 'error'));
   const items: ActionMenuItem[] = [

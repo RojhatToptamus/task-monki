@@ -51,6 +51,7 @@ kept independent: Codex, ACP, and OpenCode adapters cannot import one another.
 | Provider composition | `src/core/app/AgentRuntimeComposition.ts` | Wires built-in adapters and scoped routers; provider protocol behavior stays in each adapter. |
 | GitHub and GitLab work | `src/core/remote` (identity, objects-only fetch, delivery boundary), `src/core/github`, `src/core/gitlab` | Platforms own their records; reads and writes go through the signed-in `gh` or `glab`. Remote text is untrusted and reaches agents only as a quoted snapshot. |
 | Application preview runtime | Previewhost, embedded by `src/core/preview/ApplicationPreviewService.ts` | Owns configuration validation, processes, routing, data, and secrets. Task Monki owns worktree selection and user consent. |
+| Recorded bugs and clean runs | `src/core/bugReplay`, `src/core/storage/sqlite/SqliteBugReplayStore.ts`; the recording view in `src/electron/BugRecordingViewHost.ts` | Verdict rules (`BugReplayGate`, `BugReplayVerdict`) stay pure. The runner (`bugReplay/runner`) is bundled separately and loads playwright-core by path; only Task Monki's runner interprets a case. See [Bug Replay Architecture](BUG_REPLAY_ARCHITECTURE.md). |
 | Cross-process contracts | `src/shared` | Treat stored and transport shapes as durable. |
 | Derived UI state | `src/renderer/model` | Pure and directly testable; never a second workflow source of truth. |
 | React composition and local interaction state | `src/renderer/ui` | Split by a meaningful user-facing feature or lifecycle owner, not by element count. |

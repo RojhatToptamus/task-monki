@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type RefObject } from 'react';
+import { useCallback, useEffect, useId, useRef, type RefObject } from 'react';
 import { ChevronUp, X } from 'lucide-react';
 import type { ReviewComment } from '../../shared/contracts';
 import { formatFindingLocation } from '../model/findings';
@@ -7,6 +7,7 @@ import { formatCommentLocation } from '../model/formatting';
 import { discussionAuthor, discussionSummary, formatDiscussionLocation } from '../model/pullRequestFeedback';
 import type { ReviewRequestPlan } from '../model/reviewFollowUp';
 import { DisclosureChevron } from './DisclosureChevron';
+import { Presence, useLayerProps, useLeaving } from './presence';
 import { settledLabel, severityLabel } from './ReviewFindingThread';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 
@@ -146,7 +147,7 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
         ) : null}
         {primary}
       </div>
-      {props.sheetOpen ? <ReviewRequestSheet {...props} id={sheetId} reasonId={reasonId} summaryRef={summaryRef} /> : null}
+      <Presence>{props.sheetOpen ? <ReviewRequestSheet {...props} id={sheetId} reasonId={reasonId} summaryRef={summaryRef} /> : null}</Presence>
     </div>
   );
 }
@@ -158,7 +159,14 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
  */
 function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; reasonId: string; summaryRef: RefObject<HTMLButtonElement | null> }) {
   const { plan, comments, request, onSheetOpenChange, summaryRef } = props;
-  const sheetRef = useRef<HTMLDivElement>(null);
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const layer = useLayerProps();
+  const leaving = useLeaving();
+  const layerRef = layer.ref;
+  const attachSheet = useCallback((element: HTMLDivElement | null) => {
+    sheetRef.current = element;
+    layerRef(element);
+  }, [layerRef]);
   const findings = plan.send;
   const leftOut = [...plan.suggestions, ...plan.settled];
   const discussions = plan.discussions;
@@ -169,6 +177,7 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; reasonId: 
 
   // Escape and a click outside close the sheet; the summary toggles it itself.
   useEffect(() => {
+    if (leaving) return undefined;
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node;
       if (sheetRef.current?.contains(target) || summaryRef.current?.contains(target)) return;
@@ -183,11 +192,11 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; reasonId: 
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [onSheetOpenChange, summaryRef]);
+  }, [leaving, onSheetOpenChange, summaryRef]);
 
   let position = 0;
   return (
-    <div ref={sheetRef} id={props.id} className="tm-review-sheet" role="dialog" aria-label={verb}>
+    <div {...layer} ref={attachSheet} id={props.id} className="tm-review-sheet" role="dialog" aria-label={verb}>
       <div className="tm-review-sheet__head">
         <h2>{verb}</h2>
         <button type="button" className="tm-iconbtn" aria-label="Close" onClick={() => onSheetOpenChange(false)}><X size={13} aria-hidden="true" /></button>

@@ -46,6 +46,6 @@ export function DiscourseComposer({ draftId, blocked, model, validateModel, onPe
   return <AttachmentComposerShell attachments={files} className="tm-discourse-composer"
     attachmentLabel="Message files" hint="" toolbarStart={mode} toolbarAction={actions(files)}>
     {children(files)}
-    {error ? <p className="tm-error" role="alert">{error}</p> : null}
+    {error ? <p className="tm-notice" role="alert">{error}</p> : null}
   </AttachmentComposerShell>;
 }

@@ -85,6 +85,8 @@ export class ApplicationPreviewService {
       repositoryPath?(worktree: WorktreeRecord): Promise<string>;
       previewTitle?(name: string): Promise<string>;
       authorizeDesign?: (spec: PreviewSpec) => Promise<boolean>;
+      /** Bug Replay's clean copies: decides every operation on its own `br-` names, and nothing else. */
+      authorizeReplay?: (request: AuthorizationRequest) => Promise<boolean | undefined>;
       onApproval?(name: string): Promise<void>;
     }
   ) {}
@@ -110,6 +112,8 @@ export class ApplicationPreviewService {
   }
 
   private async authorize(request: AuthorizationRequest): Promise<boolean> {
+    const replay = await this.options.authorizeReplay?.(request);
+    if (replay !== undefined) return replay && !request.signal.aborted;
     // These calls are reachable only through verified worktree selection or explicit trusted controls below.
     if (request.operation !== 'start' && request.operation !== 'replace')
       return true;

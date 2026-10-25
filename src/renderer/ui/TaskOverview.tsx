@@ -13,6 +13,7 @@ import type { Tone } from '../model/viewTypes';
 import { displayApprovalCommand, isWithinWorktree } from '../model/approvalCommand';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
+import { PendingLabel } from './StableLabel';
 import { ActionMenu } from './ActionMenu';
 import { useClampOverflow } from './useClampOverflow';
 import { ReportedQuote } from './ReportedQuote';
@@ -40,6 +41,10 @@ export interface SlotAction {
   disabled?: boolean;
   /** Why the action is unavailable, shown beside it and tied with aria-describedby. */
   reason?: string;
+  /** The label while the action runs ("Approving…"); the control keeps one width. */
+  pendingLabel?: string;
+  /** The action is running: its label turns pending once it has run a moment (DESIGN.md 6.1). */
+  pending?: boolean;
 }
 
 export interface SlotFact {
@@ -68,6 +73,7 @@ export function SlotContent({
   reported,
   primary,
   secondary = [],
+  decline,
   children
 }: {
   headline: string;
@@ -83,6 +89,8 @@ export function SlotContent({
   reported?: { source?: string; text: string };
   primary?: SlotAction;
   secondary?: SlotAction[];
+  /** Declining a request the person approves: shown first and the primary last, as approvals are. */
+  decline?: SlotAction;
   children?: ReactNode;
 }) {
   return (
@@ -100,7 +108,7 @@ export function SlotContent({
         <blockquote className="tm-slot__quote">{reported.text}</blockquote>
       ) : null}
       {children}
-      <SlotActions primary={primary} secondary={secondary} />
+      <SlotActions primary={primary} secondary={secondary} decline={decline} />
     </>
   );
 }
@@ -108,25 +116,34 @@ export function SlotContent({
 export function SlotActions({
   primary,
   secondary = [],
+  decline,
   quiet = false
 }: {
   primary?: SlotAction;
   secondary?: SlotAction[];
+  /**
+   * Declining comes first and the primary last, as in every approval; the other answers sit
+   * between them.
+   */
+  decline?: SlotAction;
   /** Outside the decision slot nothing competes with its primary. */
   quiet?: boolean;
 }) {
   const reasonPrefix = useId();
-  if (!primary && secondary.length === 0) {
+  if (!primary && secondary.length === 0 && !decline) {
     return null;
   }
-  const all = [
-    ...(primary ? [{ action: primary, primary: true }] : []),
-    ...secondary.map((action) => ({ action, primary: false }))
-  ];
+  const lead = primary ? [{ action: primary, primary: true }] : [];
+  const others = secondary.map((action) => ({ action, primary: false }));
   // Three actions fit beside each other; past that, the first two stay and the
-  // rest, which are overrides, wait under More with their reasons inline.
-  const actions = all.length > 3 ? all.slice(0, 2) : all;
-  const overflow = all.length > 3 ? all.slice(2).map(({ action }) => action) : [];
+  // rest, which are overrides, wait under More with their reasons inline. An
+  // approval keeps declining and its primary in view.
+  const room = decline ? Math.max(0, 2 - lead.length) : 0;
+  const all = decline
+    ? [{ action: decline, primary: false }, ...others.slice(0, room), ...lead]
+    : [...lead, ...others];
+  const actions = !decline && all.length > 3 ? all.slice(0, 2) : all;
+  const overflow = (decline ? others.slice(room) : all.length > 3 ? all.slice(2) : []).map(({ action }) => action);
   // One sentence per distinct reason: two actions paused for the same cause
   // share it instead of repeating it under each button.
   const reasons = [
@@ -134,19 +151,24 @@ export function SlotActions({
   ];
   const reasonId = (reason: string | undefined) =>
     reason && reasons.includes(reason) ? `${reasonPrefix}-${reasons.indexOf(reason)}` : undefined;
+  // While one action runs, the others it holds keep their look through the pending delay too.
+  const pending = all.some(({ action }) => action.pending);
   return (
-    <div className="tm-slot__footer">
+    <div className="tm-slot__footer" data-pending={pending || undefined}>
       <div className="tm-slot__actions">
-        {actions.map(({ action, primary: isPrimary }) => (
+        {actions.map(({ action, primary: isPrimary }, index) => (
+          // Keyed by place: a label turning pending must not remount the button that has focus.
           <button
-            key={action.label}
+            key={index}
             type="button"
             className={isPrimary && !quiet ? 'primary-button' : 'outline-button'}
             disabled={action.disabled}
             aria-describedby={action.disabled ? reasonId(action.reason) : undefined}
             onClick={action.onClick}
           >
-            {action.label}
+            {action.pendingLabel ? (
+              <PendingLabel label={action.label} pendingLabel={action.pendingLabel} pending={Boolean(action.pending)} />
+            ) : action.label}
           </button>
         ))}
         {overflow.length > 0 ? (

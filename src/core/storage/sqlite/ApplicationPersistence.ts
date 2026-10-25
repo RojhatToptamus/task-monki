@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { TaskAgentRuntimeAccess } from '../../agent/AgentRuntimeStore';
+import { SqliteBugReplayStore } from './SqliteBugReplayStore';
 import { SqliteDesignDraftStore } from '../../design/DesignDraftStore';
 import { AppSettingsStore } from '../../settings/AppSettingsStore';
 import { ensurePrivateDirectory } from '../../filesystem/secureFilesystem';
@@ -71,6 +72,7 @@ export class ApplicationPersistence {
   readonly discourse: SqliteDiscourseStore;
   readonly settings: AppSettingsStore;
   readonly designDrafts: SqliteDesignDraftStore;
+  readonly bugReplay: SqliteBugReplayStore;
   readonly backups: BackupRestoreService;
 
   private closeWork?: Promise<void>;
@@ -87,6 +89,7 @@ export class ApplicationPersistence {
       discourse: SqliteDiscourseStore;
       settings: AppSettingsStore;
       designDrafts: SqliteDesignDraftStore;
+      bugReplay: SqliteBugReplayStore;
       backups: BackupRestoreService;
     }
   ) {
@@ -98,6 +101,7 @@ export class ApplicationPersistence {
     this.discourse = resources.discourse;
     this.settings = resources.settings;
     this.designDrafts = resources.designDrafts;
+    this.bugReplay = resources.bugReplay;
     this.backups = resources.backups;
   }
 
@@ -155,6 +159,8 @@ export class ApplicationPersistence {
       const discourse = new SqliteDiscourseStore(database, managedFiles);
       const settings = new AppSettingsStore(database);
       const designDrafts = new SqliteDesignDraftStore(database);
+      const bugReplay = new SqliteBugReplayStore(database, managedFiles);
+      tasks.addTaskDeletionParticipant((transaction, taskId) => bugReplay.deleteForTask(transaction, taskId));
       const backups = createLiveBackupService(
         paths,
         options.appVersion,
@@ -172,6 +178,7 @@ export class ApplicationPersistence {
         discourse,
         settings,
         designDrafts,
+        bugReplay,
         backups
       });
       try {
@@ -179,6 +186,7 @@ export class ApplicationPersistence {
           agentRuntime.init(),
           discourse.init(),
           designDrafts.init(),
+          bugReplay.init(),
           settings.get()
         ]);
       } catch (error) {

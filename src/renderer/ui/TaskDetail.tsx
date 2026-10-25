@@ -29,6 +29,7 @@ import {
   type ReviewResponseAnswer,
   type TaskReviewDraft
 } from '../../shared/contracts';
+import { isImplementationRunMode } from '../../shared/agent';
 import { reviewTurn } from '../../shared/pullRequestFeedback';
 import { effectiveReviewFindings, effectiveReviewGateStatus, reviewAcceptsDecisions } from '../../shared/agentReviewFindings';
 import type {
@@ -168,6 +169,8 @@ import {
   SlotFacts,
   type SlotAction
 } from './TaskOverview';
+import { PendingLabel } from './StableLabel';
+import { Presence } from './presence';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { conversationAnswer, conversationPreview, isActiveRunStatus, sessionTurn } from '../model/agentSession';
 import { conversationCaptureRunIds } from '../model/completedChangeSummary';
@@ -184,6 +187,13 @@ import {
   MarkDoneModal
 } from './TaskDetailModals';
 import { ReportedQuote } from './ReportedQuote';
+import { taskManagerApi } from '../api/taskManagerClient';
+import { bugOwnsNowPanel, displayedBugVerdict, reviewBehaviour } from '../model/bugReplay';
+import { initialPreviewAgentSelection } from '../model/previewAgentSelection';
+import { useNotify } from './NotifyContext';
+import { useBugReplay } from './bug/useBugReplay';
+import { BugEvidencePanel, BugNowPanel, BugNowPlaceholder, BugSection, useBugActions } from './bug/BugSection';
+import { BugRecordingWorkspace } from './bug/BugRecordingWorkspace';
 import { useArtifactReading } from './useArtifactReading';
 import { useWalkthrough } from './useWalkthrough';
 import { useReviewChanges } from './useReviewChanges';
@@ -298,10 +308,15 @@ interface TaskDetailProps {
   /** Merges what the worktree lacks into its branch; the files a conflict stops on come back. */
   onMergePullRequestUpdate(taskId: string, from: 'PULL_REQUEST' | 'BASE'): Promise<PullRequestUpdate>;
   onReadArtifact?(artifactId: string): Promise<string>;
-  onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
+  /** Mark done sends the bug verdict it showed, so a verdict about code that changed since is caught. */
+  onTransition(taskId: string, toPhase: WorkflowPhase, bugVerdict?: { caseId: string; treeId: string }): Promise<void>;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
   onModalOpenChange(open: boolean): void;
+  /** A window-level modal or sheet covers the page, so native views step aside. */
+  occluded?: boolean;
+  /** The task and tab on screen, for notices that would repeat what the page already shows. */
+  onTabChange?(tab: DetailTab | undefined, taskId: string | undefined): void;
   initialTab?: DetailTab;
 }
 
@@ -315,6 +330,9 @@ interface DeliveryStep {
 
 interface HeadAction {
   label: string;
+  /** The label while the step runs; the button keeps one width and its key. */
+  pendingLabel?: string;
+  pending?: boolean;
   disabled?: boolean;
   title?: string;
   onClick(): void;
@@ -380,6 +398,14 @@ export function TaskDetail(props: TaskDetailProps) {
     [pullRequestFeedback, requestRounds, pullRequestOpen]
   );
   const [tab, setTab] = useState<DetailTab>(props.initialTab ?? 'overview');
+  // The window decides whether a bug verdict needs a notice: not while this page shows it.
+  const { onTabChange } = props;
+  const shownTaskId = task?.id;
+  useEffect(() => {
+    onTabChange?.(tab, shownTaskId);
+    return () => onTabChange?.(undefined, shownTaskId);
+  }, [onTabChange, tab, shownTaskId]);
+  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [agentAttentionRequest, setAgentAttentionRequest] = useState(0);
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
   // Set by the Overview's Request changes and by Add to request in Ask; the Review tab opens its sheet once.
@@ -545,9 +571,6 @@ export function TaskDetail(props: TaskDetailProps) {
   // The head's failed checks by their pages: the attempt whose logs Fix checks reads.
   const failedChecksAttempt = [prStatus?.prHeadSha ?? '', ...(prRecord?.checks?.rows ?? [])
     .filter((check) => check.status === 'failed').map((check) => check.link ?? check.name)].join(' ');
-  useLayoutEffect(() => {
-    props.onModalOpenChange(taskDetailModalOpen);
-  }, [props.onModalOpenChange, taskDetailModalOpen]);
 
   useLayoutEffect(
     () => () => {
@@ -635,6 +658,78 @@ export function TaskDetail(props: TaskDetailProps) {
 
     return () => window.clearTimeout(timeout);
   }, [reviewStartPending, task?.id]);
+
+  const repositoryBlockedReason =
+    props.repository?.status !== 'AVAILABLE'
+      ? 'Reconnect this repository before running repository actions.'
+      : undefined;
+  const runtimeBlockedReason =
+    props.runtimeState && !props.runtimeState.preflight.readiness.canStart
+      ? props.runtimeState.preflight.readiness.detail ?? props.runtimeState.preflight.readiness.summary
+      : undefined;
+  // The task's recorded bug: one read shared by the Overview, the Now panel and the Preview tab.
+  const notify = useNotify();
+  const bug = useBugReplay(task?.kind === 'NORMAL' ? task.id : undefined);
+  const bugActions = useBugActions(task?.id ?? '', bug.snapshot, {
+    onOpenRecording: () => setTab('preview'),
+    onError: (message) => notify(message, 'error'),
+    // Sending the bug starts or steers an agent turn, so the task's own pause holds it too.
+    blockedReason: repositoryBlockedReason ?? runtimeBlockedReason,
+    returnFocusRef: detailRootRef
+  }, bug.refresh);
+  // The turns that carried the recorded bug: the start or follow-up that sent it, and any queued
+  // instruction that held it until its turn. A turn that carried an earlier bug is not this one's.
+  const bugTurns = useMemo(() => {
+    const caseId = bug.snapshot?.activeCase?.id ?? task?.projection.bugReplay?.caseId;
+    const title = bug.snapshot?.activeCase?.title ?? task?.projection.bugReplay?.title;
+    if (!caseId || !title) return undefined;
+    const runIds = new Set<string>();
+    for (const event of props.events) {
+      if (event.type !== 'BUG_HANDOFF_CHANGED') continue;
+      const payload = event.payload as { handoff?: unknown; gate?: { caseId?: unknown; handoff?: { runId?: unknown } } } | undefined;
+      const runId = payload?.gate?.handoff?.runId;
+      if (payload?.handoff === 'SENT' && payload.gate?.caseId === caseId && typeof runId === 'string') runIds.add(runId);
+    }
+    for (const instruction of props.agentInstructions) if (instruction.bugCase?.caseId === caseId && instruction.runId) runIds.add(instruction.runId);
+    return runIds.size ? { runIds, title, onOpen: () => setTab('overview') } : undefined;
+  }, [bug.snapshot?.activeCase?.id, bug.snapshot?.activeCase?.title, task?.projection.bugReplay?.caseId, task?.projection.bugReplay?.title, props.events, props.agentInstructions]);
+  const modalOpen = taskDetailModalOpen || bugActions.modalOpen;
+  useLayoutEffect(() => {
+    props.onModalOpenChange(modalOpen);
+  }, [props.onModalOpenChange, modalOpen]);
+  // A bug verdict is compared with the worktree whenever the Overview or Mark done shows it, and
+  // when the window regains focus: an editor edit no Git action saw makes it out of date.
+  const bugVerdictTree = task?.projection.bugReplay?.verdictTreeId;
+  const bugCurrencyWanted = Boolean(task?.id && bugVerdictTree && (tab === 'overview' || markDoneModal));
+  const [bugCurrencyPending, setBugCurrencyPending] = useState(false);
+  useEffect(() => {
+    const taskId = task?.id;
+    if (!taskId || !bugCurrencyWanted) {
+      setBugCurrencyPending(false);
+      return;
+    }
+    let disposed = false;
+    let inFlight = false;
+    const check = () => {
+      if (inFlight || disposed) return;
+      inFlight = true;
+      // A quick answer never flashes "Checking current files".
+      const slow = window.setTimeout(() => {
+        if (!disposed) setBugCurrencyPending(true);
+      }, 300);
+      void taskManagerApi.checkBugVerdictCurrency({ taskId }).catch(() => undefined).finally(() => {
+        window.clearTimeout(slow);
+        inFlight = false;
+        if (!disposed) setBugCurrencyPending(false);
+      });
+    };
+    check();
+    window.addEventListener('focus', check);
+    return () => {
+      disposed = true;
+      window.removeEventListener('focus', check);
+    };
+  }, [task?.id, bugVerdictTree, bugCurrencyWanted]);
 
   // Every hook runs before the empty state below returns, so a task that
   // disappears while open never changes the hook order.
@@ -938,7 +1033,7 @@ export function TaskDetail(props: TaskDetailProps) {
     }
     await runReviewAction(async () => {
       try {
-        await props.onTransition(task.id, 'DONE');
+        await props.onTransition(task.id, 'DONE', displayedBugVerdict(task.projection.bugReplay));
         setMarkDoneModal(undefined);
       } catch {
         // The app shell reports the error. Keep the modal open so the user can retry.
@@ -1135,7 +1230,9 @@ export function TaskDetail(props: TaskDetailProps) {
   const directImportReview = importedBeforeFirstRun && task.workflowPhase === 'IN_PROGRESS';
   if (directImportReview) {
     headActions.push({
-      label: reviewPending ? 'Starting review…' : 'Run agent review',
+      label: 'Run agent review',
+      pendingLabel: 'Starting review…',
+      pending: reviewPending,
       ...nextActionState('run-review'),
       onClick: () => void runReview()
     });
@@ -1183,7 +1280,8 @@ export function TaskDetail(props: TaskDetailProps) {
     dirtyFileCount,
     finishMergeStatus,
     finishCiStatus,
-    finishVerifiedChecksEvidence
+    finishVerifiedChecksEvidence,
+    bugCurrencyPending
   );
   const runFailure = describeRunFailureBanner(task, run);
 
@@ -1237,6 +1335,10 @@ export function TaskDetail(props: TaskDetailProps) {
     interactionPending: Boolean(pendingInteraction),
     recoveryRequired: Boolean(recoveryRun),
     runInFlight: Boolean(activeImplementationRun) || reviewIsRunning || reviewPending,
+    bugStepOwed: bugOwnsNowPanel(task.projection.bugReplay, {
+      agentWorking: Boolean(activeImplementationRun),
+      implementationStarted: props.runs.some((candidate) => candidate.taskId === task.id && isImplementationRunMode(candidate.mode))
+    }),
     checkoutUnavailable: Boolean(worktree && ['MISSING', 'PRUNABLE', 'ERROR'].includes(worktree.status)),
     deliveryOpen: prStatus.hasPullRequest && prStatus.kind !== 'MERGED' && !reviewLeads,
     finishRelevant:
@@ -1274,14 +1376,6 @@ export function TaskDetail(props: TaskDetailProps) {
       : fixed > 0 ? `${runtimeName} fixed ${fixed} of ${answers.length} ${noun(answers.length)}`
         : `${runtimeName} answered ${answers.length} ${noun(answers.length)}`;
   })();
-  const repositoryBlockedReason =
-    props.repository?.status !== 'AVAILABLE'
-      ? 'Reconnect this repository before running repository actions.'
-      : undefined;
-  const runtimeBlockedReason =
-    props.runtimeState && !props.runtimeState.preflight.readiness.canStart
-      ? props.runtimeState.preflight.readiness.detail ?? props.runtimeState.preflight.readiness.summary
-      : undefined;
   const conversationAction: SlotAction = { label: 'Open conversation', onClick: () => setTab('agent') };
   const startTaskAction = (action: () => Promise<void>) => () =>
     void runReviewAction(async () => {
@@ -1406,7 +1500,9 @@ export function TaskDetail(props: TaskDetailProps) {
           headline={failed ? 'Worktree setup failed' : 'Checkout missing'}
           detail={checkout.error}
           primary={{
-            label: props.worktreePreparationPending ? 'Inspecting base…' : failed ? 'Retry worktree setup' : 'Restore worktree',
+            label: failed ? 'Retry worktree setup' : 'Restore worktree',
+            pendingLabel: 'Inspecting base…',
+            pending: props.worktreePreparationPending,
             disabled: props.worktreePreparationPending || Boolean(blocked),
             reason: blocked,
             onClick: () => void props.onPrepareWorktree(task.id)
@@ -1416,6 +1512,11 @@ export function TaskDetail(props: TaskDetailProps) {
     );
   };
 
+  // Record bug leads only while it can start and the task has no bug or recording yet.
+  const canRecordBugNow = Boolean(
+    bug.snapshot?.availability.canRecord && !bug.snapshot.availability.recordDisabledReason
+    && !bug.snapshot.activeCase && !bug.snapshot.recording
+  );
   const setupDecision = (setup: NonNullable<typeof primaryAction>) => {
     const ready = worktree?.status === 'PRESENT';
     // A Git or delivery problem is the task's state: the slot names it in the
@@ -1434,11 +1535,23 @@ export function TaskDetail(props: TaskDetailProps) {
           detail={attentionDetail}
           primary={{
             label: setup.label,
+            pendingLabel: setup.pendingLabel,
+            pending: setup.pending,
             disabled: setup.disabled || Boolean(blocked),
             reason: blocked,
             onClick: () => setup.onClick()
           }}
-          secondary={ready && !externalWork ? [{ label: 'Edit setup', onClick: () => setTab('agent') }] : []}
+          secondary={ready && !externalWork ? [
+            // Before the first turn, a recorded bug goes to the agent with it: recording comes first.
+            ...(canRecordBugNow ? [{
+              label: 'Record bug',
+              pendingLabel: 'Starting…',
+              pending: bugActions.busy === 'record-again',
+              disabled: Boolean(bugActions.busy),
+              onClick: () => bugActions.perform('record-again')
+            }] : []),
+            { label: 'Edit setup', onClick: () => setTab('agent') }
+          ] : []}
         />
       </DecisionSlot>
     );
@@ -1498,6 +1611,8 @@ export function TaskDetail(props: TaskDetailProps) {
     importedBeforeFirstRun && primaryAction
       ? {
           label: primaryAction.label,
+          pendingLabel: primaryAction.pendingLabel,
+          pending: primaryAction.pending,
           disabled: primaryAction.disabled || Boolean(runtimeBlockedReason),
           reason: runtimeBlockedReason,
           onClick: () => primaryAction.onClick()
@@ -1649,6 +1764,10 @@ export function TaskDetail(props: TaskDetailProps) {
         return recoveryRun ? recoveryDecision(recoveryRun) : null;
       case 'running':
         return runningDecision();
+      case 'bug':
+        return bug.snapshot?.activeCase
+          ? <BugNowPanel view={bug.snapshot.activeCase} snapshot={bug.snapshot} actions={bugActions} />
+          : <BugNowPlaceholder gate={task.projection.bugReplay} />;
       case 'checkout':
         return worktree ? checkoutDecision(worktree) : null;
       case 'delivery':
@@ -1709,9 +1828,10 @@ export function TaskDetail(props: TaskDetailProps) {
       disabled={action.disabled}
       title={action.title}
       aria-describedby={place === 'head' && repositoryUnavailable ? repositoryContextId : undefined}
+      data-pending={action.pending || undefined}
       onClick={action.onClick}
     >
-      {action.label}
+      {action.pendingLabel ? <PendingLabel label={action.label} pendingLabel={action.pendingLabel} pending={Boolean(action.pending)} /> : action.label}
     </button>
   );
   const taskMenu = (place: 'head' | 'titlebar') => (
@@ -1727,6 +1847,7 @@ export function TaskDetail(props: TaskDetailProps) {
       onArchive={props.onArchive}
       onRequestDelete={props.onRequestDelete}
       onOpenDebug={() => setTab('debug')}
+      onOpenChange={setTaskMenuOpen}
       className={place === 'head' ? 'tm-detail__taskmenu' : 'tm-titlebar__taskmenu'}
       align={place === 'head' ? 'end' : 'start'}
     />
@@ -1734,8 +1855,8 @@ export function TaskDetail(props: TaskDetailProps) {
   const taskMasthead = (
       <div
         className="tm-detail__masthead"
-        inert={taskDetailModalOpen ? true : undefined}
-        aria-hidden={taskDetailModalOpen ? true : undefined}
+        inert={modalOpen ? true : undefined}
+        aria-hidden={modalOpen ? true : undefined}
       >
         <div className="tm-detail__row">
           <h1 ref={setHeadTitle} className="tm-detail__title" tabIndex={-1}>
@@ -1839,8 +1960,9 @@ export function TaskDetail(props: TaskDetailProps) {
     />
   ) : null;
   // One assistant panel at a time: Ask, or the Preview agent on Preview
-  // (rendered into this slot by the Preview).
-  const previewAgentSheet = tab === 'preview' && previewAgentOpen && props.previewAgent
+  // (rendered into this slot by the Preview). A bug recording takes the
+  // Preview's place, and the Preview agent returns when it ends.
+  const previewAgentSheet = tab === 'preview' && previewAgentOpen && props.previewAgent && !bug.snapshot?.recording
     ? <div ref={setPreviewAgentSlot} className="tm-side-sheet__slot" />
     : null;
   const sidePanel = askPanel
@@ -1866,7 +1988,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const titleRowRequest = Boolean(pendingInteraction) && !['overview', 'agent', 'review'].includes(tab);
 
   const taskNav = (
-        <div className="tm-detail__nav" inert={taskDetailModalOpen ? true : undefined} aria-hidden={taskDetailModalOpen ? true : undefined}>
+        <div className="tm-detail__nav" inert={modalOpen ? true : undefined} aria-hidden={modalOpen ? true : undefined}>
         <div className="tm-tabs" role="tablist" aria-label="Task sections">
           <AccessibleTab
             id="task-detail-tab-overview"
@@ -1917,7 +2039,7 @@ export function TaskDetail(props: TaskDetailProps) {
             Ask
           </button>
         ) : null}
-        {tab === 'preview' && props.previewAgent ? (
+        {tab === 'preview' && props.previewAgent && !bug.snapshot?.recording ? (
           <button
             ref={previewAgentToggleRef}
             type="button"
@@ -1967,10 +2089,10 @@ export function TaskDetail(props: TaskDetailProps) {
         ref={bodyRef}
         role="tabpanel"
         aria-labelledby={`task-detail-tab-${tab}`}
-        inert={taskDetailModalOpen ? true : undefined}
-        aria-hidden={taskDetailModalOpen ? true : undefined}
+        inert={modalOpen ? true : undefined}
+        aria-hidden={modalOpen ? true : undefined}
       >
-        {error ? <div className="tm-error tm-error--page">{error}</div> : null}
+        {error ? <div className="tm-notice tm-notice--page">{error}</div> : null}
 
         {tab === 'overview' ? (
           <div className="tm-overview">
@@ -1986,6 +2108,16 @@ export function TaskDetail(props: TaskDetailProps) {
                     source={remoteSource} snapshot={remoteSnapshot} linked={remoteSource?.kind !== 'PULL_REQUEST'}
                     sourceTitle={remoteSource && remoteSource.title !== task.title ? remoteSource.title : undefined} />
                 )}
+                {/* The recorded bug is part of what was asked; its evidence comes before the result. */}
+                {bug.snapshot ? (
+                  <BugSection taskId={task.id} snapshot={bug.snapshot} actions={bugActions}
+                    nowPanel={decisionOwner === 'bug' ? 'step' : decisionOwner === 'setup' && describeTaskAttention(task)?.kind === 'bug' ? 'state' : undefined}
+                    onOpenRecording={() => setTab('preview')} />
+                ) : bug.error && task.projection.bugReplay ? (
+                  <OverviewSection title="Bug" inset aside={<button type="button" className="tm-osection__link" onClick={bug.refresh}>Try again</button>}>
+                    <p className="tm-notice">Couldn't load the bug: {bug.error}</p>
+                  </OverviewSection>
+                ) : null}
                 {/* A run's result is what a completed run left behind; a running one has none yet. */}
                 {progressRun?.status === 'COMPLETED' ? (
                   <OverviewSection
@@ -2091,6 +2223,7 @@ export function TaskDetail(props: TaskDetailProps) {
           onRespond={props.onRespondToInteraction} onReadArtifact={props.onReadArtifact}
           onShowDebug={() => setTab('debug')} onShowReview={() => setTab('review')}
           attentionRequested={agentAttentionRequest} header={<div className="tm-detail__chrome">{taskNav}</div>}
+          bugTurns={bugTurns}
           preRun={!run ? <PreRunSetup
             prompt={task.prompt}
             promptDraft={task.promptDraft}
@@ -2105,6 +2238,8 @@ export function TaskDetail(props: TaskDetailProps) {
             disabled={Boolean(primaryAction?.disabled)}
             action={primaryAction ? {
               label: primaryAction.label,
+              pendingLabel: primaryAction.pendingLabel,
+              pending: primaryAction.pending,
               disabled: primaryAction.disabled || reviewActionsPaused || props.repository?.status !== 'AVAILABLE',
               title: props.repository?.status !== 'AVAILABLE'
                 ? 'Reconnect this repository before running repository actions.'
@@ -2120,7 +2255,36 @@ export function TaskDetail(props: TaskDetailProps) {
             onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('review'); }} /> : null}
         /> : null}
 
-        {tab === 'preview' ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name}
+        {tab === 'preview' && bug.snapshot?.recording ? (
+          <BugRecordingWorkspace
+            key={bug.snapshot.recording.sessionId}
+            taskId={task.id}
+            recording={bug.snapshot.recording}
+            replaces={bug.snapshot.activeCase?.title}
+            covered={modalOpen || taskMenuOpen || Boolean(props.occluded) || Boolean(sidePanel && !sidePanelLayout.docked)}
+            onModalOpenChange={bugActions.onLayerOpenChange}
+            onSaved={() => setTab('overview')}
+            onAskPreviewAgent={props.previewAgent && !props.previewAgent.disabledReason ? (text) => {
+              const agent = props.previewAgent!;
+              void (async () => {
+                try {
+                  await taskManagerApi.cancelBugRecording({ taskId: task.id, sessionId: bug.snapshot!.recording!.sessionId });
+                  changePreviewAgentOpen(true, true);
+                  await agent.send(text, crypto.randomUUID(), initialPreviewAgentSelection(agent.runs, agent.defaults));
+                } catch (cause) {
+                  notify(cause instanceof Error ? cause.message : String(cause), 'error');
+                }
+              })();
+            } : undefined}
+          />
+        ) : null}
+
+        {tab === 'preview' && !bug.snapshot?.recording ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name}
+          recordBug={bug.snapshot?.availability.canRecord ? {
+            disabledReason: bug.snapshot.availability.recordDisabledReason,
+            pending: bugActions.busy === 'record-again',
+            onRecord: () => bugActions.perform('record-again')
+          } : undefined}
           worktree={worktree} worktreePending={props.worktreePreparationPending} onModalOpenChange={setPreviewModalOpen}
           onRestoreWorktree={() => props.onRestoreWorktree(task.id)}
           onPrepareWorktree={() => props.onPrepareWorktree(task.id)}
@@ -2170,6 +2334,7 @@ export function TaskDetail(props: TaskDetailProps) {
             } : undefined}
             brief={{
               asked: requestRepeatsTitle(task) ? undefined : task.prompt,
+              behaviour: reviewBehaviour(bug.snapshot?.activeCase),
               report: resultReport ? { author: runtimeName, text: resultReport } : undefined,
               reviewer: reviewGate.status !== 'NOT_RUN' ? {
                 author: [reviewerName, reviewRun?.observedSettings?.model ?? reviewRun?.requestedSettings.model].filter((part): part is string => Boolean(part)),
@@ -2280,6 +2445,8 @@ export function TaskDetail(props: TaskDetailProps) {
               rootRef={debugActivityRef}
             />
             <TaskHealthFindings findings={task.projection.findings} />
+            {bug.snapshot ? <BugEvidencePanel taskId={task.id} snapshot={bug.snapshot} onError={(message) => notify(message, 'error')}
+              onModalOpenChange={bugActions.onLayerOpenChange} refresh={bug.refresh} /> : null}
             <div className="tm-debug__notice">
               Provider diagnostics are for troubleshooting. Verified evidence remains the source of truth.
             </div>
@@ -2316,7 +2483,7 @@ export function TaskDetail(props: TaskDetailProps) {
       </div>
 
 
-      {existingWorkModal && worktree && props.onListExistingWorktrees ? (
+      <Presence>{existingWorkModal && worktree && props.onListExistingWorktrees ? (
         <ExistingWorkModal key={`${task.id}:${existingWorkModal}`} mode={existingWorkModal} worktree={worktree}
           onListCheckouts={props.onListExistingWorktrees}
           onCancel={() => setExistingWorkModal(undefined)} fallbackReturnFocusRef={detailRootRef}
@@ -2325,9 +2492,9 @@ export function TaskDetail(props: TaskDetailProps) {
             else if (existingWorkModal === 'comparison') await props.onUpdateWorktreeComparison?.(task.id, value);
             else await props.onReconnectWorktree?.(task.id, value);
           }} />
-      ) : null}
+      ) : null}</Presence>
 
-      {markDoneModal ? (
+      <Presence>{markDoneModal ? (
         <MarkDoneModal
           withIssues={markDoneModal === 'issues'}
           warnings={markDoneModal === 'issues' ? finishEvidence.warnings : []}
@@ -2342,9 +2509,9 @@ export function TaskDetail(props: TaskDetailProps) {
           onConfirm={() => void markDone()}
           fallbackReturnFocusRef={detailRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {draftPrModalOpen ? (
+      <Presence>{draftPrModalOpen ? (
         <CreateDraftPrModal
           noun={prNoun}
           title={draftPrTitle}
@@ -2361,9 +2528,11 @@ export function TaskDetail(props: TaskDetailProps) {
           onSubmit={submitDraftPr}
           fallbackReturnFocusRef={detailRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {mergeModalOpen && prStatus.prHeadSha ? (
+      {bugActions.dialogs}
+
+      <Presence>{mergeModalOpen && prStatus.prHeadSha ? (
         <MergePullRequestModal
           platform={remoteProviderName(provider)}
           noun={remoteWorkNoun(provider, 'PULL_REQUEST')}
@@ -2377,9 +2546,9 @@ export function TaskDetail(props: TaskDetailProps) {
           onCancel={() => setMergeModalOpen(false)}
           fallbackReturnFocusRef={detailRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {replyModalOpen ? (
+      <Presence>{replyModalOpen ? (
         <ReplyToReviewersModal
           platform={remoteProviderName(provider)}
           agent={runtimeName}
@@ -2401,9 +2570,10 @@ export function TaskDetail(props: TaskDetailProps) {
           onCancel={() => setReplyModalOpen(false)}
           fallbackReturnFocusRef={detailRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {sidePanel && !sidePanelLayout.docked ? <FloatingSidePanel>{sidePanel.element}</FloatingSidePanel> : null}
+      {/* Closing it lets it leave; docking it as the window widens moves it at once. */}
+      <Presence exit={!sidePanel}>{sidePanel && !sidePanelLayout.docked ? <FloatingSidePanel>{sidePanel.element}</FloatingSidePanel> : null}</Presence>
     </main>
     {sidePanel && sidePanelLayout.docked ? (
       <DockedSidePanel width={sidePanelLayout.width} maxWidth={sidePanelLayout.maxWidth} onWidthChange={sidePanelLayout.setWidth} label={sidePanel.label}>{sidePanel.element}</DockedSidePanel>
@@ -2659,7 +2829,7 @@ function getPrimaryAction(input: {
   worktreePreparationPending?: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string, request?: string): Promise<void>;
-}): { label: string; disabled?: boolean; onClick(request?: string): void } | undefined {
+}): { label: string; pendingLabel?: string; pending?: boolean; disabled?: boolean; onClick(request?: string): void } | undefined {
   if (['IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(input.task.workflowPhase)) {
     return undefined;
   }
@@ -2667,10 +2837,11 @@ function getPrimaryAction(input: {
   if (!input.worktree || ['REMOVED', 'MISSING', 'ERROR'].includes(input.worktree.status)) {
     if (input.worktree?.ownership === 'EXTERNAL') return undefined;
     return {
-      label: input.worktreePreparationPending ? 'Inspecting base…'
-        : input.worktree?.status === 'MISSING' ? 'Restore worktree'
+      label: input.worktree?.status === 'MISSING' ? 'Restore worktree'
         : input.worktree?.status === 'ERROR' ? 'Retry worktree setup'
         : 'Prepare worktree',
+      pendingLabel: 'Inspecting base…',
+      pending: input.worktreePreparationPending,
       disabled: input.worktreePreparationPending,
       onClick: () => void input.onPrepareWorktree(input.task.id)
     };

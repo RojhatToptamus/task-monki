@@ -10,6 +10,8 @@ import {
   type FinishRequirement
 } from '../model/taskFinish';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { ModalFrame } from './ModalFrame';
+import { PendingLabel } from './StableLabel';
 
 export function ExistingWorkModal({
   mode, worktree, onListCheckouts, onSubmit, onCancel, fallbackReturnFocusRef
@@ -59,8 +61,7 @@ export function ExistingWorkModal({
     }
   };
   return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="existing-work-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame labelledBy="existing-work-title" pending={busy} onDismiss={onCancel}>
       <form ref={panelRef} className="tm-modal__panel" tabIndex={-1} onSubmit={(event) => void submit(event)}>
         <h3 id="existing-work-title">{label}</h3>
         <div>
@@ -92,13 +93,13 @@ export function ExistingWorkModal({
             </label>
           )}
         </div>
-        {error ? <p className="form-error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-notice tm-modal__notice" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>Cancel</button>
-          <button type="submit" className="primary-button" disabled={busy || !value.trim()}>{busy ? 'Working…' : label}</button>
+          <button type="submit" className="primary-button" disabled={busy || !value.trim()}><PendingLabel label={label} pendingLabel="Working…" pending={busy} /></button>
         </div>
       </form>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -157,8 +158,7 @@ export function CreateDraftPrModal({
   };
 
   return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="draft-pr-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame labelledBy="draft-pr-title" pending={busy} onDismiss={onCancel}>
       <form
         ref={panelRef}
         className="tm-modal__panel tm-draftpr-modal"
@@ -214,18 +214,18 @@ export function CreateDraftPrModal({
         ) : null}
 
         {disabled && disabledReason ? <p className="form-warning">{disabledReason}</p> : null}
-        {error ? <p className="form-error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-notice tm-modal__notice" role="alert">{error}</p> : null}
 
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
             Cancel
           </button>
           <button type="submit" className="primary-button" disabled={confirmDisabled}>
-            {busy ? 'Creating…' : `Create draft ${noun}`}
+            <PendingLabel label={`Create draft ${noun}`} pendingLabel="Creating…" pending={busy} />
           </button>
         </div>
       </form>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -248,7 +248,7 @@ export function MarkDoneModal({
   onConfirm(): void;
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
 }) {
-  const copy = markDoneModalCopy(withIssues, busy, { hasPullRequest });
+  const copy = markDoneModalCopy(withIssues, { hasPullRequest });
   const panelRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   useDialogFocusBoundary({
@@ -259,8 +259,7 @@ export function MarkDoneModal({
     onClose: onCancel
   });
   return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="mark-done-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame labelledBy="mark-done-title" pending={busy} onDismiss={onCancel}>
       <div ref={panelRef} className="tm-modal__panel" tabIndex={-1}>
         <h3 id="mark-done-title">{copy.title}</h3>
         <p>{copy.body}</p>
@@ -277,8 +276,8 @@ export function MarkDoneModal({
           </ul>
         ) : null}
         {withIssues && requirements.length === 0 ? (
-          <div className="tm-modal__warning">
-            <strong>{copy.fallbackWarningTitle}</strong>
+          <div className="tm-notice tm-modal__notice" data-tone="waiting">
+            <strong className="tm-notice__title">{copy.fallbackWarningTitle}</strong>
             <span>{warnings[0]?.detail ?? copy.fallbackWarningDetail}</span>
           </div>
         ) : null}
@@ -293,10 +292,10 @@ export function MarkDoneModal({
             Cancel
           </button>
           <button type="button" className="primary-button" disabled={busy} onClick={onConfirm}>
-            {copy.confirmLabel}
+            <PendingLabel label={copy.confirmLabel} pendingLabel={copy.pendingLabel} pending={busy} />
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 }

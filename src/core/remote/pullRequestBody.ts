@@ -10,6 +10,8 @@ export function buildPullRequestBody(input: {
   issueLine?: string;
   /** The platform that receives the body. */
   provider: RemoteProvider;
+  /** Bug Replay's block for the task's recorded bug, already bounded and worded. */
+  behaviour?: string;
 }): string {
   const gitLab = input.provider === 'GITLAB';
   const request = input.task.prompt.trim().slice(0, 1200);
@@ -22,6 +24,7 @@ export function buildPullRequestBody(input: {
     '',
     `- Diff stat: ${input.gitDiffStat?.trim().slice(0, 4000) || 'No diff stat captured.'}`,
     '',
+    ...(input.behaviour ? [input.behaviour.trim().slice(0, 2000), ''] : []),
     '## Agent summary',
     '',
     input.agentSummary?.trim().slice(0, 8000) || 'No agent final summary captured.',

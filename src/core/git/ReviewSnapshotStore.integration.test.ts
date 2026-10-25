@@ -67,6 +67,30 @@ describe('ReviewSnapshotStore', () => {
     expect(diff).not.toContain('staged.js');
   });
 
+  it('captures an edit made within the second the index was written, which cached file stats would hide', async () => {
+    const { repo, store } = await repository();
+    const second = async (file: string) => Math.floor((await fs.stat(file)).mtimeMs / 1000);
+    const cachedSecond = async () => Number(/mtime: (\d+):/.exec(await git(repo, ['ls-files', '--debug', 'total.js']))?.[1]);
+    // A same-length edit in the very second Git cached the file and wrote the index: its stats
+    // match the cached ones, so Git reads it again only while the index keeps its own time.
+    let racy = false;
+    for (let attempt = 0; attempt < 10 && !racy; attempt += 1) {
+      await write(repo, 'total.js', 'total $40.00\n');
+      await git(repo, ['add', 'total.js']);
+      await git(repo, ['commit', '--quiet', '-m', `total ${attempt}`]);
+      await write(repo, 'total.js', 'total $45.00\n');
+      const cached = await cachedSecond();
+      racy = cached === (await second(path.join(repo, '.git', 'index'))) && cached === (await second(path.join(repo, 'total.js')));
+    }
+    expect(racy).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+    const { treeId } = await store.captureTree(repo, 'refs/tasks/task-1/bug-replay/probe');
+
+    expect(treeId).not.toBe((await git(repo, ['rev-parse', 'HEAD^{tree}'])).trim());
+    expect(await store.readText(repo, treeId, 'total.js')).toBe('total $45.00\n');
+  });
+
   it('runs no repository hook, even one the checkout itself carries, while capturing', async () => {
     const { repo, store } = await repository();
     const marker = path.join(path.dirname(repo), 'hook-ran');

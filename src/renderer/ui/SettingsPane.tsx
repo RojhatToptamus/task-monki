@@ -29,6 +29,16 @@ export function SettingsPane({
   );
 }
 
+/** A titled group inside a Settings section, such as one table among several. */
+export function SettingsSubsection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="tm-settings__subsection">
+      <h3>{title}</h3>
+      {children}
+    </section>
+  );
+}
+
 /** One setting: its name and an optional line under it on the left, the control on the right. */
 export function SettingsRow({ label, description, children }: {
   label: ReactNode;

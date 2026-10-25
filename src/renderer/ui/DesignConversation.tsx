@@ -31,6 +31,7 @@ import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { DesignReadyMenu } from './DesignActionsMenu';
 import { DisclosureChevron } from './DisclosureChevron';
+import { PendingLabel } from './StableLabel';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { ArrowUp, RotateCcw, Square } from 'lucide-react';
 
@@ -340,6 +341,7 @@ export function DesignConversation({
             type="button"
             className="tm-design-conversation__earlier"
             disabled={loadingEarlier}
+            data-pending={loadingEarlier || undefined}
             onClick={() => {
               const viewport = scroller.scrollRef.current;
               if (viewport) prepend.current = { height: viewport.scrollHeight, top: viewport.scrollTop };
@@ -356,7 +358,7 @@ export function DesignConversation({
                 .finally(() => setLoadingEarlier(false));
             }}
           >
-            {loadingEarlier ? 'Loading…' : 'Load earlier messages'}
+            <PendingLabel label="Load earlier messages" pendingLabel="Loading…" pending={loadingEarlier} />
           </button>
         ) : null}
         {conversation.length === 0 && pending.length === 0 ? (
@@ -544,11 +546,11 @@ export function DesignConversation({
           ) : null}
         </AttachmentComposerShell>
         {attachments.overflowError || attachments.modelError ? (
-          <p className="task-attachment-message task-attachment-message--error" role="alert">
+          <p className="form-error" role="alert">
             {attachments.overflowError ?? attachments.modelError}
           </p>
         ) : null}
-        {error ? <p className="tm-design-composer__error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-notice tm-design-composer__error" role="alert">{error}</p> : null}
       </form>
     </section>
   );

@@ -37,7 +37,7 @@ export function ReviewNavigator({ model, rail, onRailChange, filterRef }: {
   const matches = query.trim() ? model.ordered.filter(({ file }) => matchesFileQuery(file.path, query)) : model.ordered;
   return (
     <div className="tm-review__rail">
-      <div className="segmented segmented--fill tm-review__rail-switch" role="group" aria-label="Show">
+      <div className="segmented segmented--fill segmented--compact tm-review__rail-switch" role="group" aria-label="Show">
         <button type="button" className="segmented__btn" aria-pressed={rail === 'files'} onClick={() => onRailChange('files')}>
           Files<span className="tm-review__rail-count">
             {viewedCount ? <><span aria-hidden="true">{viewedCount}/{fileCount}</span><span className="tm-visually-hidden">{viewedCount} of {fileCount} viewed</span></> : fileCount}

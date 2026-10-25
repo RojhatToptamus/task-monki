@@ -12,6 +12,7 @@ import { ReviewDiff } from './ReviewDiff';
 import { ReviewGuide } from './ReviewGuide';
 import { ReviewNavigator, type ReviewRail } from './ReviewNavigator';
 import { ReviewOutcome } from './ReviewRequest';
+import { PendingLabel } from './StableLabel';
 import { Elapsed } from './SessionTurns';
 import { Tooltip } from './Tooltip';
 import { useReviewKeys } from './useReviewKeys';
@@ -107,7 +108,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
         <section className="tm-review" aria-label="Review" data-review-mode={mode} data-file-full-screen={model.focusedFile ? '' : undefined} onKeyDown={onKeyDown}>
           <div className="tm-review__bar">
             {props.historical ? null : (
-              <div className="segmented tm-review__modes" role="group" aria-label="Read as">
+              <div className="segmented segmented--compact tm-review__modes" role="group" aria-label="Read as">
                 {MODES.map(({ mode: value, label }) => (
                   <Tooltip key={value} label={label} shortcut="G">
                     <button type="button" className="segmented__btn" aria-pressed={mode === value} aria-keyshortcuts="G" onClick={() => actions.setMode(value)}>
@@ -148,7 +149,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                     {/* A finished, current review can run again from beside its time. */}
                     {rerunSettled && run && (run.starting || !run.disabledReason) && !guideHoldsRun ? (
                       <Tooltip label={run.label}>
-                        <button type="button" className="tm-iconbtn" aria-label={run.label} disabled={run.busy} onClick={run.onRun}>
+                        <button type="button" className="tm-iconbtn" aria-label={run.label} disabled={run.busy} data-pending={run.starting || undefined} onClick={run.onRun}>
                           <RefreshCw size={16} aria-hidden="true" />
                         </button>
                       </Tooltip>
@@ -160,9 +161,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                           type="button"
                           className={model.stale ? 'primary-button button--sm' : 'outline-button button--sm'}
                           disabled={Boolean(run.disabledReason) || run.busy}
+                          data-pending={run.starting || undefined}
                           onClick={run.onRun}
                         >
-                          {run.starting ? 'Starting…' : run.label}
+                          <PendingLabel label={run.label} pendingLabel="Starting…" pending={Boolean(run.starting)} />
                         </button>
                       </span>
                     ) : null}
@@ -214,7 +216,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
 
           {/* The Guide reads the capture too until a walkthrough brings its own code. */}
           {model.incomplete && (diffMode || !model.guide.model) ? (
-            <p className="tm-review__notice" role="status">The captured diff is incomplete. Listed files are real; missing ones are not established.</p>
+            <p className="tm-notice tm-notice--band tm-review__notice" data-tone="waiting" role="status">The captured diff is incomplete. Listed files are real; missing ones are not established.</p>
           ) : null}
           <div className="tm-review__work">
             {diffMode ? <ReviewNavigator model={model} rail={rail} onRailChange={setRail} filterRef={filterRef} /> : null}

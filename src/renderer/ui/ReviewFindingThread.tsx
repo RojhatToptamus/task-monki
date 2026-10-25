@@ -171,7 +171,7 @@ export function ReviewFindingThread({
       {answer ? <RequestItemAnswer answer={answer} /> : null}
       {dismissing && onDismiss ? (
         <form className="tm-review-thread__dismiss" onSubmit={(event) => { event.preventDefault(); void run(() => onDismiss(finding.id, reason, note.trim() || undefined)); }}>
-          <div className="segmented" role="group" aria-label="Why dismiss it">
+          <div className="segmented segmented--compact" role="group" aria-label="Why dismiss it">
             {(Object.keys(DISMISS_REASON_LABELS) as ReviewFindingDismissReason[]).map((value) => (
               <button key={value} type="button" className="segmented__btn" aria-pressed={reason === value} onClick={() => setReason(value)}>
                 {DISMISS_REASON_LABELS[value]}

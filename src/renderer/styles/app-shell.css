@@ -237,7 +237,9 @@
   align-items: center;
   gap: 4px;
   width: 56px;
-  padding: 2px 0 14px;
+  /* The first item centres on the sheet's 48px first line; the last ends on the line every
+     composer and foot ends on. */
+  padding: 6px 0 24px;
   background: var(--ground);
 }
 
@@ -382,22 +384,6 @@
   padding-top: 16px;
 }
 
-/* The inline notice (DESIGN.md 10), in the blocked tone. Inside a composer, card
-   or dialog it sits in its container's flow; on a page it takes the gutter. */
-.tm-error {
-  margin: 0;
-  padding: 8px 12px;
-  border-radius: var(--r-sm);
-  background: var(--blocked-bg);
-  color: var(--blocked-ink);
-  font-size: var(--t-help);
-  line-height: var(--lh-ui);
-}
-
-.tm-error.tm-error--page {
-  margin: 0 var(--tm-gutter) 8px;
-}
-
 /* ---- Kanban board ---- */
 
 .tm-board {
@@ -409,6 +395,7 @@
   gap: 12px;
   padding: 6px var(--tm-gutter) 24px;
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .tm-col {
@@ -422,8 +409,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  /* With the card list's 2px, the first card sits 12px below the label. */
-  padding: 6px 4px 10px;
+  /* With the card list's 2px, the first card sits 12px below the label; the label starts on
+     the cards' edge. */
+  padding: 6px 0 10px;
 }
 
 .tm-col__label {
@@ -444,7 +432,10 @@
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+  /* 2px for the cards' rings and shadows, taken back with the scrollbar's gutter so the cards
+     end on the lane's edge and lanes stay 12px apart. */
   padding: 2px 2px 16px;
+  margin-inline: -2px calc(-2px - var(--scrollbar));
   flex: 1;
   min-height: 0;
   scrollbar-gutter: stable;
@@ -480,11 +471,10 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px var(--tm-gutter) 24px;
+  padding: 6px calc(var(--tm-gutter) - var(--scrollbar)) 24px var(--tm-gutter);
   scrollbar-gutter: stable;
 }
 
-.tm-board,
 .tm-inbox,
 .tm-setup,
 .tm-agent-console__menu {
@@ -537,7 +527,7 @@
   gap: 6px;
   width: 100%;
   min-height: 100%;
-  padding: 11px 12px 12px;
+  padding: 12px;
   border: 0;
   border-radius: var(--r-md);
   background: transparent;
@@ -546,8 +536,8 @@
   text-align: left;
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-card__hit:focus,
-.app-shell[data-input-modality='keyboard'] .tm-taskmenu__trigger:focus {
+:root[data-input-modality='keyboard'] .tm-card__hit:focus,
+:root[data-input-modality='keyboard'] .tm-taskmenu__trigger:focus {
   outline: 0;
   box-shadow: var(--focus-halo);
 }
@@ -705,7 +695,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px var(--tm-gutter) 28px;
+  padding: 4px calc(var(--tm-gutter) - var(--scrollbar)) 28px var(--tm-gutter);
 }
 
 .tm-inbox__inner {
@@ -756,9 +746,9 @@
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr) auto auto auto;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   min-height: 60px;
-  padding: 10px 12px 10px 16px;
+  padding: 10px 16px;
   transition: background-color var(--motion-fast) var(--ease-out);
 }
 
@@ -793,7 +783,7 @@
 }
 
 /* A row inside the scrolling list: the halo is drawn inward so it is never cut. */
-.app-shell[data-input-modality='keyboard'] .tm-inbox-row__hit:focus {
+:root[data-input-modality='keyboard'] .tm-inbox-row__hit:focus {
   outline: 0;
   box-shadow: var(--focus-halo-inset);
 }
@@ -937,7 +927,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px var(--tm-gutter) 32px;
+  padding: 12px calc(var(--tm-gutter) - var(--scrollbar)) 32px var(--tm-gutter);
 }
 
 /* The page's reading column, under its title like every other page. */
@@ -956,7 +946,7 @@
 }
 
 .tm-setup-section__head {
-  margin: 0 0 0 2px;
+  margin: 0;
   color: var(--muted);
   font-size: var(--t-group);
   font-weight: var(--w-medium);
@@ -1187,7 +1177,7 @@
 }
 
 .tm-settings__title {
-  margin: 4px 8px 12px;
+  margin: 0 8px 12px;
   color: var(--text);
   font-size: var(--t-title);
   font-weight: var(--w-title);
@@ -1224,7 +1214,7 @@
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 24px var(--tm-gutter) 48px;
+  padding: 24px calc(var(--tm-gutter) - var(--scrollbar)) 48px var(--tm-gutter);
   scrollbar-gutter: stable;
 }
 
@@ -1247,6 +1237,8 @@
   color: var(--text);
   font-size: var(--t-heading);
   font-weight: var(--w-medium);
+  /* A whole-pixel line box (DESIGN.md 8.2), so the pane under it starts on a whole pixel. */
+  line-height: var(--lh-body);
 }
 
 .tm-settings__pane-head p {
@@ -1284,7 +1276,7 @@
 }
 
 .tm-settings__subsection > h3 {
-  margin: 0 0 0 2px;
+  margin: 0;
   color: var(--muted);
   font-size: var(--t-group);
   font-weight: var(--w-medium);
@@ -1385,6 +1377,10 @@
   animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
 
+.tm-theme-picker__menu[data-state='closed'] {
+  animation: tm-shrink-out var(--motion-fast) var(--ease-out) forwards;
+}
+
 .tm-theme-picker__group + .tm-theme-picker__group {
   margin-top: 4px;
   padding-top: 4px;
@@ -1426,7 +1422,7 @@
 
 /* The keyboard row, as in ActionMenu: the selected fill and the halo drawn
    inward, so the scrolling menu never cuts it. */
-.app-shell[data-input-modality='keyboard'] .tm-theme-picker__option:focus {
+:root[data-input-modality='keyboard'] .tm-theme-picker__option:focus {
   background-color: var(--sel);
   outline: 0;
   box-shadow: var(--focus-halo-inset);
@@ -1851,7 +1847,7 @@
   box-shadow: inset 0 0 0 1px var(--blocked);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-agent-console__trigger--error:focus {
+:root[data-input-modality='keyboard'] .tm-agent-console__trigger--error:focus {
   box-shadow: inset 0 0 0 1px var(--blocked), var(--focus-halo);
 }
 
@@ -1899,6 +1895,10 @@
      it again replays the entrance because [hidden] removes its box. */
   transform-origin: top left;
   animation: tm-menu-in var(--motion-standard) var(--ease-out);
+}
+
+.tm-agent-console__menu[data-state='closed'] {
+  animation: tm-shrink-out var(--motion-fast) var(--ease-out) forwards;
 }
 
 .tm-agent-console__menu--top {
@@ -2042,7 +2042,7 @@
 
 /* The keyboard row, as in ActionMenu: the selected fill and the halo drawn
    inward, so the scrolling list never cuts it. */
-.app-shell[data-input-modality='keyboard'] .tm-agent-console__option.is-active {
+:root[data-input-modality='keyboard'] .tm-agent-console__option.is-active {
   background-color: var(--sel);
   box-shadow: var(--focus-halo-inset);
 }
@@ -2388,7 +2388,7 @@
 /* Reusable profile instructions share the settings and form controls. */
 .tm-profile-editor {
   display: grid;
-  gap: 12px;
+  gap: 16px;
   min-width: 0;
 }
 

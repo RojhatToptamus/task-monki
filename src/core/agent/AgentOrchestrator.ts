@@ -305,6 +305,8 @@ export interface StartOrchestratedReview {
   beforeGitSnapshotId?: string;
   /** The earlier review's findings and decisions, so the new review does not re-raise settled ones without reason. */
   previousReview?: PreviousReviewContext;
+  /** What Task Monki observed about the task's recorded bug, worded and bounded by Bug Replay. */
+  bugSection?: string;
   /**
    * The code the review reads, kept under `runId`: its tree, recorded with the
    * run's start, and the change it holds, listed in the prompt for the walkthrough.
@@ -2227,6 +2229,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       worktree: input.worktree,
       target: input.target,
       previousReview: input.previousReview,
+      bugSection: input.bugSection,
       changeIndex: input.reviewedCode?.changeIndex
     });
     const executionContext = await this.buildReadOnlyCheckoutContext(reviewRuntimeId, {

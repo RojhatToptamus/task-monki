@@ -22,6 +22,10 @@
   pointer-events: none;
 }
 
+.newtask-modal[data-state='closed'] .newtask-modal__panel {
+  animation: tm-shrink-out var(--motion-fast) var(--ease-out) forwards;
+}
+
 /* The panel head (DESIGN.md 9.1): 48 tall. */
 .newtask-modal__header {
   display: flex;
@@ -31,7 +35,7 @@
   height: var(--h-head);
   flex: 0 0 auto;
   padding: 0 12px 0 16px;
-  border-bottom: 1px solid var(--hair);
+  box-shadow: inset 0 -1px 0 var(--hair);
 }
 
 /* Expand and Close sit together at the head's end, 2px apart like every pair of icon buttons. */
@@ -97,7 +101,7 @@
 }
 
 .tm-newtask-repository legend {
-  margin-bottom: 7px;
+  margin-bottom: 8px;
   padding: 0;
   color: var(--text);
   font-size: var(--t-label);
@@ -185,6 +189,10 @@
   animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
 
+.tm-repository-select__popover[data-state='closed'] {
+  animation: tm-shrink-out var(--motion-fast) var(--ease-out) forwards;
+}
+
 /* 4px inside the popover's 10px corner, so the field steps in to 6px. */
 .tm-repository-select__popover .tm-repository-picker__search {
   height: var(--h-control);
@@ -230,7 +238,7 @@
 
 /* The keyboard row, as in ActionMenu: the selected fill and the halo drawn
    inward, so the scrolling list never cuts it. */
-.app-shell[data-input-modality='keyboard'] .tm-repository-select__option:focus {
+:root[data-input-modality='keyboard'] .tm-repository-select__option:focus {
   outline: 0;
   background-color: var(--sel);
   box-shadow: var(--focus-halo-inset);
@@ -286,7 +294,7 @@
 }
 
 /* The list scrolls, so the focused row's halo is drawn inside it. */
-.app-shell[data-input-modality='keyboard'] .tm-repository-picker__option:focus-within {
+:root[data-input-modality='keyboard'] .tm-repository-picker__option:focus-within {
   outline: 0;
   box-shadow: var(--focus-halo-inset);
 }
@@ -336,15 +344,17 @@
   font-size: var(--t-help);
 }
 
+/* One form rhythm everywhere (DESIGN.md 9): a field is its label, its control and its help,
+   8px apart, and fields sit 16px apart. */
 .field {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 8px;
 }
 
 .field-grid {
   display: grid;
-  gap: 14px;
+  gap: 16px;
 }
 
 .field > span,
@@ -478,7 +488,7 @@
   display: none;
 }
 
-.app-shell[data-input-modality='keyboard'] .task-attachment__remove:focus {
+:root[data-input-modality='keyboard'] .task-attachment__remove:focus {
   outline: 0;
   box-shadow: var(--focus-halo);
 }
@@ -610,20 +620,6 @@
   font-size: var(--t-help);
   font-weight: var(--w-medium);
   pointer-events: none;
-}
-
-.task-attachment-message {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  margin: 0;
-  color: var(--muted);
-  font-size: var(--t-meta);
-  line-height: var(--lh-meta);
-}
-
-.task-attachment-message--error {
-  color: var(--blocked-ink);
 }
 
 /* The refined text shown as a proposal with Accept / Revert: a recessed group
@@ -866,12 +862,12 @@
 }
 
 .import-work__search input:focus,
-.app-shell[data-input-modality='keyboard'] .import-work__search input:focus {
+:root[data-input-modality='keyboard'] .import-work__search input:focus {
   background: transparent;
   box-shadow: none;
 }
 
-.app-shell[data-input-modality='keyboard'] .import-work__picker:focus-within {
+:root[data-input-modality='keyboard'] .import-work__picker:focus-within {
   box-shadow: var(--focus-halo);
 }
 
@@ -903,7 +899,7 @@
 .import-work__checkout[aria-selected='true'] { background-color: var(--sel); color: var(--text); }
 .import-work__checkout:disabled { background-color: var(--field-disabled); color: var(--text-disabled); }
 /* The list scrolls, so the active option's halo is drawn inside the row. */
-.app-shell[data-input-modality='keyboard'] .import-work__checkout:focus {
+:root[data-input-modality='keyboard'] .import-work__checkout:focus {
   outline: 0;
   box-shadow: var(--focus-halo-inset);
 }
@@ -947,6 +943,7 @@
 .remote-work__meta > .remote-work__checks { display: inline-flex; align-items: center; align-self: center; overflow: visible; }
 .import-work__unavailable { grid-column: 2 / -1; font-size: var(--t-meta); }
 .import-work__empty { margin: 0; padding: 12px; font-size: var(--t-help); color: var(--muted); }
+.import-work__error { margin: 8px; }
 .import-work__comparison { display: flex; }
 .import-work__comparison .segmented__btn { flex: 1; }
 .import-work__commit { font-family: var(--font-mono); }
@@ -979,8 +976,7 @@
 .remote-work__header { min-height: var(--lh-ui); }
 .remote-work__header .tm-composer-chip { margin-block: calc((var(--lh-ui) - var(--h-toolbar)) / 2); }
 /* Why the list could not be read, with Retry at its end when retrying can help. */
-.remote-work__problem { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px; }
-.remote-work__problem code { color: inherit; font-size: var(--t-meta); }
+.import-work__error code { color: inherit; font-size: var(--t-meta); }
 /* An issue or pull request row: its number and title, then who and when, on one line. */
 .remote-work__identity { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .remote-work__title { flex: 1 1 0%; min-width: 0; overflow: hidden; color: inherit; font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
@@ -1018,16 +1014,20 @@
   font-size: var(--t-help);
 }
 
+/* One field's error or warning, under it in place of its help (DESIGN.md 10). A message about
+   the surface or its action is a notice (.tm-notice). */
 .form-error {
   margin: 0;
   color: var(--blocked-ink);
   font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 
 .form-warning {
   margin: 0;
   color: var(--waiting-ink);
   font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 .task-attachment__open {
   padding: 0;

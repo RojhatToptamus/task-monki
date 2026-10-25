@@ -87,7 +87,7 @@ function readValue(args: string[], index: number, flag: string): string {
 }
 
 function readScenarioSet(value: string): DevSeedScenarioSet {
-  if (['all', 'board', 'agent', 'review', 'delivery', 'completion', 'workflow', 'preview', 'discourse'].includes(value)) {
+  if (['all', 'board', 'agent', 'review', 'delivery', 'completion', 'workflow', 'preview', 'bug', 'discourse'].includes(value)) {
     return value as DevSeedScenarioSet;
   }
   throw new Error(`Unknown scenario set: ${value}`);

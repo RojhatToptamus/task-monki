@@ -22,6 +22,7 @@ import {
 import { RawProviderMessage } from './RawProviderMessage';
 import { DisclosureChevron } from './DisclosureChevron';
 import { humanizeEnum } from './display';
+import { PendingLabel } from './StableLabel';
 
 interface ProviderOverviewPanelProps {
   task: Task;
@@ -246,9 +247,10 @@ export function ProviderOverviewPanel({
                 type="button"
                 className="outline-button button--sm"
                 disabled={syncing || !session.materialized}
+                data-pending={syncing || undefined}
                 onClick={() => void sync()}
               >
-                {syncing ? 'Syncing…' : 'Resync provider goal'}
+                <PendingLabel label="Resync provider goal" pendingLabel="Syncing…" pending={syncing} />
               </button>
             ) : null}
           </div>
@@ -277,7 +279,7 @@ export function ProviderOverviewPanel({
               <span>{goal?.providerStatus ?? '—'}</span>
             </dd>
           </dl>
-          {goal?.detail ? <p className="provider-warning">{goal.detail}</p> : null}
+          {goal?.detail ? <p className="tm-notice" data-tone="waiting">{goal.detail}</p> : null}
           {goal ? <RawProviderMessage reference={goal.rawMessage} /> : null}
         </div>
       ) : null}
@@ -421,7 +423,7 @@ function NativeSessionControlsPanel({
         ))}
       </div>
       {updating ? <p className="muted">Updating provider session…</p> : null}
-      {error ? <p className="provider-warning">{error}</p> : null}
+      {error ? <p className="tm-notice" data-tone="waiting">{error}</p> : null}
     </div>
   );
 }

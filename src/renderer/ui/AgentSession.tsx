@@ -20,6 +20,7 @@ import { Elapsed, Turn, UserMessage, useSessionTurns } from './SessionTurns';
 import { StatusGlyph } from './StatusBadge';
 import { ArrowUp, ChevronDown, MoreHorizontal, Pencil, Play, RotateCcw } from 'lucide-react';
 import { AgentMark } from './UiIcons';
+import { PendingLabel } from './StableLabel';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 
 export interface AgentSessionProps {
@@ -62,6 +63,8 @@ export interface AgentSessionProps {
   capture(run: RunRecord): ReactNode;
   attentionRequested: number;
   header?: ReactNode;
+  /** The runs that carried the task's recorded bug to the agent, shown on their messages. */
+  bugTurns?: { runIds: ReadonlySet<string>; title: string; onOpen(): void };
 }
 
 type SendMode = 'QUEUE' | 'STEER' | 'CONTINUE' | 'RETRY';
@@ -275,7 +278,8 @@ export function AgentSession(props: AgentSessionProps) {
             failure={turn === lastImplementation && turn.state !== 'active' ? props.failure : undefined}
             sourceName={props.runtimeName}
             capture={turn.state === 'completed' ? props.capture(turn.run) : null}
-            onReadArtifact={props.onReadArtifact} onShowDebug={props.onShowDebug} />)}
+            onReadArtifact={props.onReadArtifact} onShowDebug={props.onShowDebug}
+            bug={props.bugTurns?.runIds.has(turn.run.id) ? { title: props.bugTurns.title, onOpen: props.bugTurns.onOpen } : undefined} />)}
         {unattached.map((item) => <UserMessage key={item.id} text={item.text} time={item.createdAt}
           attachments={props.attachments.filter((file) => item.attachmentIds?.includes(file.id))} onReadAttachment={props.onReadAttachment}
           status={item.status === 'SENDING' ? 'Sending…' : item.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Not sent'} />)}
@@ -296,11 +300,11 @@ export function AgentSession(props: AgentSessionProps) {
       </div>
     </Conversation>
     {run ? <div className="tm-agent-session__dock"><div className="tm-agent-session__footer">
-      <form className="tm-agent-session__composer" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); if (editing) saveEdit(); else void submit(); }}>
+      <form className="tm-agent-session__composer" aria-busy={busy} data-pending={busy || undefined} onSubmit={(event) => { event.preventDefault(); if (editing) saveEdit(); else void submit(); }}>
         <AttachmentComposerShell compact={questionPending} attachments={composerFiles} attachmentLabel="Message attachments"
           hint={<span id={`agent-composer-note-${task.id}`}>{hint ?? model}</span>}
           toolbarAction={<>
-            {editing ? <button className="primary-button tm-composer__primary" type="submit" disabled={busy || editFiles.busy || !editing.text.trim() || editFiles.hasErrors || Boolean(editFiles.modelError)}>{busy ? 'Saving…' : 'Save'}</button> : <>
+            {editing ? <button className="primary-button tm-composer__primary" type="submit" disabled={busy || editFiles.busy || !editing.text.trim() || editFiles.hasErrors || Boolean(editFiles.modelError)}><PendingLabel label="Save" pendingLabel="Saving…" pending={busy} /></button> : <>
               {!active && actions?.canForkAlternative ? <ActionMenu label="More session actions" tooltip="More actions" disabled={busy || hasFiles}
                 trigger={<MoreHorizontal size={16} aria-hidden="true" />}
                 items={[{ label: 'Fork alternative', description: 'Start from the recorded base. Local changes are not included.', disabled: Boolean(blocked), disabledReason: blocked,
@@ -358,7 +362,7 @@ export function AgentSession(props: AgentSessionProps) {
         })}</ul> : null}
         </AttachmentComposerShell>
       </form>
-      {currentError || props.draftError || fileError ? <p className="tm-error" role="alert">{currentError ?? props.draftError ?? fileError}</p> : null}
+      {currentError || props.draftError || fileError ? <p className="tm-notice" role="alert">{currentError ?? props.draftError ?? fileError}</p> : null}
     </div></div> : null}
   </section>;
 }

@@ -18,3 +18,12 @@ export function formatShortAge(iso: string, now: number = Date.now()): string | 
   const sameYear = date.getFullYear() === new Date(now).getFullYear();
   return new Intl.DateTimeFormat(undefined, sameYear ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' }).format(date);
 }
+
+/** A running clock: "0:41", "12:05", "1:02:09". */
+export function formatClock(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const seconds = String(totalSeconds % 60).padStart(2, '0');
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`;
+}

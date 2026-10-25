@@ -2,6 +2,7 @@ import type { AgentProfilesSettingsActions } from './AgentProfilesSettings';
 import { PullRequestStateIcon } from './PullRequestIcon';
 import { useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import {
+  Bug,
   CircleCheck,
   CircleQuestionMark,
   CircleX,
@@ -219,7 +220,7 @@ export function MainColumn({
         <PageHead title="Inbox" subtitle={inboxSubtitle(tasks)} />
       ) : null}
 
-      {error ? <div className="tm-error tm-error--page">{error}</div> : null}
+      {error ? <div className="tm-notice tm-notice--page">{error}</div> : null}
 
       {showRepositorySetup ? (
         <FirstLaunchSetup
@@ -715,6 +716,7 @@ const ATTENTION_ICONS: Record<TaskAttentionKind, LucideIcon> = {
   failure: CircleX,
   checkout: FolderX,
   git: GitBranch,
+  bug: Bug,
   review: ListChecks,
   delivery: GitPullRequest,
   finish: CircleCheck

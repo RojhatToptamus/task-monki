@@ -21,6 +21,7 @@ import { previewConfigurationChanges, type PreviewConfigurationChange } from '..
 import { AccessibleTab } from '../AccessibleTabs';
 import { ActionMenu, type ActionMenuItem } from '../ActionMenu';
 import { DecisionBlock } from '../DecisionBlock';
+import { PendingLabel } from '../StableLabel';
 import { Chip } from '../StatusBadge';
 import { ApplicationActivity } from './ApplicationActivity';
 import { ApplicationConfiguration, type ConfigurationView, type PreviewEditorDraft } from './ApplicationConfiguration';
@@ -166,10 +167,13 @@ export function ApplicationPreviewPanel({
   onPrepareWorktree,
   onReconnectCheckout,
   onModalOpenChange,
-  agentHost
+  agentHost,
+  recordBug
 }: {
   taskId: string;
   projectName?: string;
+  /** Record a bug in a clean copy of this app; absent where Bug Replay cannot record. */
+  recordBug?: { disabledReason?: string; pending?: boolean; onRecord(): void };
   /** The task worktree: the folder commands run in, and the state that decides whether Preview can run at all. */
   worktree?: WorktreeRecord;
   worktreePending?: boolean;
@@ -699,6 +703,16 @@ export function ApplicationPreviewPanel({
               ) : null}
             </div>
             <div className="tm-preview-statusrow__actions">
+              {recordBug?.disabledReason ? (
+                <span id={`${taskId}-record-bug-reason`} className="tm-preview-record-reason">{recordBug.disabledReason}</span>
+              ) : null}
+              {recordBug ? (
+                <button type="button" className="outline-button" disabled={busy || recordBug.pending || Boolean(recordBug.disabledReason)}
+                  data-pending={recordBug.pending || undefined}
+                  aria-describedby={recordBug.disabledReason ? `${taskId}-record-bug-reason` : undefined} onClick={recordBug.onRecord}>
+                  <PendingLabel label="Record bug" pendingLabel="Starting…" pending={Boolean(recordBug.pending)} />
+                </button>
+              ) : null}
               {row.secondary.map((item) => (
                 <button key={item.action} className={item.action === 'discard' || item.action === 'revert' ? 'ghost-button' : 'outline-button'} disabled={busy || (item.action === 'save' && !editable) || (item.action === 'draft' && agentWorking)} onClick={actions[item.action]}>
                   {item.label}

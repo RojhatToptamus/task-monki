@@ -59,6 +59,7 @@ import type {
   ShowDesignCanvasRequest
 } from '../../shared/designCanvas';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
+import { bugStateBaseWord } from '../../shared/bugReplayClaims';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { partitionAgentRecords, type AgentConversationRecords } from '../model/agentRecords';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
@@ -150,6 +151,7 @@ import {
 } from './AppNavigation';
 import { Tooltip, TooltipProvider } from './Tooltip';
 import { NotifyProvider } from './NotifyContext';
+import { Presence } from './presence';
 import { appendToDraft } from '../model/sideQuestions';
 
 const AUTHORITATIVE_REFRESH_DELAY_MS = 50;
@@ -201,6 +203,23 @@ function isPreviewRecipeGenerationSnapshot(
 }
 
 const REVIEW_STARTED_NOTICE = 'Review started';
+
+/**
+ * A bug verdict that settled, said wherever the person is: the clean runs took minutes. One form
+ * for every verdict, the state's own word and the bug: "Fix verified: Cart total shows "$40.00"".
+ */
+function bugVerdictNotice(task: BoardTaskSummary, previous: string | undefined): { message: string; tone: NotificationTone } | undefined {
+  const bug = task.projection.bugReplay;
+  if (!bug || previous === undefined || previous === bug.state) return undefined;
+  const title = bug.title.length > 60 ? `${bug.title.slice(0, 59).trimEnd()}…` : bug.title;
+  const settled: Partial<Record<string, NotificationTone>> = previous === 'VERIFYING'
+    ? { FIX_VERIFIED: 'success', STILL_FAILING: 'error', COULDNT_VERIFY: 'info' }
+    : previous === 'REPRODUCING'
+      ? { REPRODUCED: 'success', NOT_REPRODUCED: 'info', FLAKY: 'info' }
+      : {};
+  const tone = settled[bug.state];
+  return tone ? { message: `${bugStateBaseWord(bug.state)}: ${title}`, tone } : undefined;
+}
 
 /** What a finished review says in a notice; a stopped review was the person's own doing. */
 function reviewFinishedNotice(task: BoardTaskSummary): { message: string; tone: NotificationTone } | undefined {
@@ -264,7 +283,9 @@ export function App() {
       document.removeEventListener('pointermove', onPointerMove, true);
     };
   }, []);
-  useEffect(() => {
+  // Shared focus and disabled rules key on the document's modality (portaled dialogs included):
+  // set before paint, so no frame shows a control without it.
+  useLayoutEffect(() => {
     document.documentElement.dataset.inputModality = inputModality;
   }, [inputModality]);
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(emptyBoardSnapshot);
@@ -1524,6 +1545,24 @@ export function App() {
     }
   }, [snapshot.tasks, notify]);
 
+  // So does a bug verdict, which clean runs reach minutes after the turn that asked for it.
+  const bugStatesRef = useRef<Map<string, string | undefined> | undefined>(undefined);
+  const shownOverviewTaskRef = useRef<string | undefined>(undefined);
+  const reportDetailTab = useCallback((tab: string | undefined, taskId: string | undefined) => {
+    shownOverviewTaskRef.current = tab === 'overview' ? taskId : undefined;
+  }, []);
+  useEffect(() => {
+    const previous = bugStatesRef.current;
+    bugStatesRef.current = new Map(snapshot.tasks.map((task) => [task.id, task.projection.bugReplay?.state]));
+    if (!previous) return;
+    for (const task of snapshot.tasks) {
+      // The task's Overview on screen already shows the new state; a notice would repeat it.
+      if (task.id === shownOverviewTaskRef.current) continue;
+      const notice = bugVerdictNotice(task, previous.get(task.id));
+      if (notice) notify(notice.message, notice.tone);
+    }
+  }, [snapshot.tasks, notify]);
+
   const selectedTaskCandidate = snapshot.tasks.find((task) => task.id === selectedTaskId);
   const selectedTask =
     taskDetail && taskDetail.task.id === selectedTaskId
@@ -2257,10 +2296,10 @@ export function App() {
     discard: discardPreviewRecipeDraft
   });
 
-  const transitionTask = async (taskId: string, toPhase: WorkflowPhase) => {
+  const transitionTask = async (taskId: string, toPhase: WorkflowPhase, bugVerdict?: { caseId: string; treeId: string }) => {
     setError(undefined);
     try {
-      await withAppAction(() => taskManagerApi.transitionTask({ taskId, toPhase }));
+      await withAppAction(() => taskManagerApi.transitionTask({ taskId, toPhase, ...(bugVerdict ? { bugVerdict } : {}) }));
       notify(`Task moved to ${toPhase.toLowerCase().replace(/_/g, ' ')}.`, 'success');
       await refresh();
     } catch (caught) {
@@ -3047,6 +3086,8 @@ export function App() {
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}
             onModalOpenChange={setIsTaskDetailModalOpen}
+            occluded={appOwnedModalOpen || isNewTaskOpen}
+            onTabChange={reportDetailTab}
           />
         ) : showDetail ? (
           <main className="tm-main" aria-live="polite">
@@ -3062,7 +3103,7 @@ export function App() {
                 </span>
               </div>
             </div>
-            {error ? <div className="tm-error tm-error--page">{error}</div> : null}
+            {error ? <div className="tm-notice tm-notice--page">{error}</div> : null}
           </main>
         ) : view === 'previews' ? (
           <PreviewsPage
@@ -3228,7 +3269,7 @@ export function App() {
         </div>
       </div>
 
-      {isNewTaskOpen ? (
+      <Presence>{isNewTaskOpen ? (
         <NewTaskPanel
           agentProfiles={appSettings.agentProfiles}
           repositoryId={activeRepositoryId}
@@ -3257,9 +3298,9 @@ export function App() {
           fallbackReturnFocusRef={appRootRef}
           onClose={closeNewTask}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {deleteCandidate ? (
+      <Presence>{deleteCandidate ? (
         <DeleteTaskModal
           task={deleteCandidate}
           worktree={deleteCandidateWorktree}
@@ -3272,9 +3313,9 @@ export function App() {
           onConfirm={(removeWorktree) => deleteTask(deleteCandidate.id, removeWorktree)}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {repositoryDisconnect ? (
+      <Presence>{repositoryDisconnect ? (
         <RepositoryDisconnectModal
           repository={repositoryDisconnect.repository}
           impact={repositoryDisconnect.impact}
@@ -3282,9 +3323,9 @@ export function App() {
           onConfirm={confirmRepositoryDisconnect}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {boardEditor ? (
+      <Presence>{boardEditor ? (
         <BoardEditorModal
           key={boardEditor === 'new' ? 'new' : boardEditor.id}
           board={boardEditor === 'new' ? undefined : boardEditor}
@@ -3294,9 +3335,9 @@ export function App() {
           onDelete={deleteBoard}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {designExternalLinkRequest ? (
+      <Presence>{designExternalLinkRequest ? (
         <DesignExternalLinkModal
           key={designExternalLinkRequest.pendingId}
           destinationHost={designExternalLinkRequest.destinationHost}
@@ -3304,9 +3345,9 @@ export function App() {
           onConfirm={() => approveDesignExternalLink(designExternalLinkRequest)}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {worktreePreparation?.inspection.mode === 'CREATE' ? (
+      <Presence>{worktreePreparation?.inspection.mode === 'CREATE' ? (
         <PrepareWorktreeModal
           inspection={worktreePreparation.inspection}
           returnFocus={worktreePreparation.returnFocus}
@@ -3332,9 +3373,9 @@ export function App() {
           onConfirm={() => void confirmWorktreePreparation()}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {worktreePreparation?.inspection.mode === 'RECOVER' ? (
+      <Presence>{worktreePreparation?.inspection.mode === 'RECOVER' ? (
         <RecoverWorktreeModal
           inspection={worktreePreparation.inspection}
           returnFocus={worktreePreparation.returnFocus}
@@ -3351,7 +3392,7 @@ export function App() {
           onConfirm={() => void confirmWorktreePreparation()}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
       <GlobalNotifier notifications={notifications} />
     </div>

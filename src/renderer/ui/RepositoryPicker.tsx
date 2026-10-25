@@ -5,6 +5,7 @@ import {
   type RepositoryOption
 } from '../model/repositories';
 import { UiChevronDownIcon } from './UiIcons';
+import { Presence } from './presence';
 
 interface RepositoryPickerProps {
   options: RepositoryOption[];
@@ -113,7 +114,7 @@ export function RepositorySelect({
         <UiChevronDownIcon open={open} size={13} className="tm-repository-select__chevron" />
       </button>
 
-      {open ? (
+      <Presence>{open ? (
         <div
           className="tm-repository-select__popover"
           id={popupId}
@@ -160,7 +161,7 @@ export function RepositorySelect({
             )}
           </div>
         </div>
-      ) : null}
+      ) : null}</Presence>
     </div>
   );
 }

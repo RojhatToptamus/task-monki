@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react';
+import { useLeaving } from './presence';
 
 const DIALOG_FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -133,9 +134,12 @@ export function useDialogFocusBoundary({
   busyRef.current = busy;
   closeRef.current = onClose;
   shouldReturnFocusRef.current = shouldReturnFocus;
+  // A dialog that is leaving (DESIGN.md §12) hands focus back as it starts to go, not after.
+  const leaving = useLeaving();
+  const holding = active && !leaving;
 
   useEffect(() => {
-    if (!active) return;
+    if (!holding) return;
     returnFocusRef.current = returnFocus ??
       (typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null));
     const frame = window.requestAnimationFrame(() => {
@@ -170,7 +174,7 @@ export function useDialogFocusBoundary({
       });
     };
   }, [
-    active,
+    holding,
     dialogRef,
     fallbackReturnFocusRef,
     initialFocusRef,
@@ -179,7 +183,7 @@ export function useDialogFocusBoundary({
   ]);
 
   useEffect(() => {
-    if (!active || !busy) {
+    if (!holding || !busy) {
       return;
     }
     const frame = window.requestAnimationFrame(() => {
@@ -196,7 +200,7 @@ export function useDialogFocusBoundary({
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [active, busy, dialogRef]);
+  }, [holding, busy, dialogRef]);
 }
 
 export function dialogFocusableElements(dialog: HTMLElement): HTMLElement[] {

@@ -85,6 +85,8 @@ import {
   InspectorSidebar,
   InspectorSection
 } from './DiscourseOverlays';
+import { Presence } from './presence';
+import { PendingLabel } from './StableLabel';
 import { DisclosureChevron } from './DisclosureChevron';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { PanelResizeHandle } from './PanelResizeHandle';
@@ -1935,13 +1937,12 @@ export function DiscourseWorkspace({
           >
           {conversationRefreshFailed || conversationRefreshing ? (
             <div
-              className={`tm-discourse-status-banner ${
-                conversationRefreshFailed ? 'tm-discourse-status-banner--error' : ''
-              }`}
+              className="tm-notice tm-discourse-status-banner"
+              data-tone={conversationRefreshFailed ? undefined : 'waiting'}
               role={conversationRefreshFailed ? 'alert' : 'status'}
             >
               <span>
-                <strong>
+                <strong className="tm-notice__title">
                   {conversationRefreshing ? 'Refreshing conversation…' : 'Conversation refresh paused'}
                 </strong>
                 {conversationRefreshing
@@ -1949,29 +1950,31 @@ export function DiscourseWorkspace({
                   : conversationLoadState.detail ?? 'The latest conversation state could not be loaded.'}
               </span>
               {conversationRefreshFailed ? (
-                <button
-                  type="button"
-                  onClick={() => selectedConversationId && void loadConversation(selectedConversationId, true)
-                    .catch((error) => reportDiscourseError(error, 'Could not refresh the conversation.'))}
-                >
-                  Try again
-                </button>
+                <div className="tm-notice__actions">
+                  <button
+                    type="button"
+                    onClick={() => selectedConversationId && void loadConversation(selectedConversationId, true)
+                      .catch((error) => reportDiscourseError(error, 'Could not refresh the conversation.'))}
+                  >
+                    Try again
+                  </button>
+                </div>
               ) : null}
             </div>
           ) : null}
           {interruptedAcceptedSends.length > 0 ? (
-            <div className="tm-discourse-status-banner" role="status">
+            <div className="tm-notice tm-discourse-status-banner" data-tone="waiting" role="status">
               <span>
-                <strong>Agent response setup was interrupted</strong>
-                Your message and agent choices are saved. Resume safely or cancel the response.
+                <strong className="tm-notice__title">Agent response setup was interrupted</strong>
+                Your message and agent choices are saved.
               </span>
-              <div className="tm-discourse-status-banner__actions">
+              <div className="tm-notice__actions" data-pending={acceptedSendActionId ? true : undefined}>
                 <button
                   type="button"
                   disabled={Boolean(acceptedSendActionId)}
                   onClick={() => void resumeAcceptedSend(interruptedAcceptedSends[0]!.id)}
                 >
-                  {acceptedSendActionId === interruptedAcceptedSends[0]!.id ? 'Working…' : 'Resume'}
+                  <PendingLabel label="Resume" pendingLabel="Working…" pending={acceptedSendActionId === interruptedAcceptedSends[0]!.id} />
                 </button>
                 <button
                   type="button"
@@ -2085,7 +2088,7 @@ export function DiscourseWorkspace({
           )}
             <div aria-hidden="true" className="tm-discourse-transcript__end" />
           </div>
-          {newResponses ? (
+          <Presence>{newResponses ? (
             <button
               type="button"
               className="tm-discourse-new-responses"
@@ -2097,7 +2100,7 @@ export function DiscourseWorkspace({
               New responses
               <ArrowDown size={16} aria-hidden="true" />
             </button>
-          ) : null}
+          ) : null}</Presence>
         </div>
 
         <div className="tm-discourse-composer-wrap">
@@ -2144,18 +2147,19 @@ export function DiscourseWorkspace({
                   aria-label={previewLoading ? 'Resolving agent context' : 'Context'}
                   aria-expanded={Boolean(preview)}
                   disabled={previewLoading || composerUnavailable}
+                  data-pending={previewLoading || undefined}
                   onClick={() => preview ? setPreview(undefined) : void showPreview()}
                 >
                   <DiscourseContextPreviewIcon />
-                  <span>{previewLoading ? 'Resolving…' : 'Context'}</span>
+                  <PendingLabel label="Context" pendingLabel="Resolving…" pending={previewLoading} />
                 </button>
-                {preview ? (
+                <Presence>{preview ? (
                   <ContextPreview
                     preview={preview}
                     returnFocus={previewButtonRef.current}
                     onClose={() => setPreview(undefined)}
                   />
-                ) : null}
+                ) : null}</Presence>
                 <Tooltip label={activeWave ? 'Stop response' : responsePolicy === 'NONE' ? 'Post note' : 'Send'}
                   shortcut={activeWave ? undefined : SUBMIT_SHORTCUT} side="top"><button
                   type="button"
@@ -2294,7 +2298,7 @@ export function DiscourseWorkspace({
         </>
       ) : null}
 
-      {confirmAction?.type === 'delete-conversation' ? (
+      <Presence>{confirmAction?.type === 'delete-conversation' ? (
         <ConfirmDialog
           title="Delete conversation?"
           body="This removes the transcript and its Task Monki discourse records. Referenced tasks and repositories are not changed."
@@ -2302,8 +2306,8 @@ export function DiscourseWorkspace({
           onCancel={() => setConfirmAction(undefined)}
           onConfirm={() => void deleteConversation()}
         />
-      ) : null}
-      {confirmAction?.type === 'delete-message' ? (
+      ) : null}</Presence>
+      <Presence>{confirmAction?.type === 'delete-message' ? (
         <ConfirmDialog
           title="Delete message?"
           body="The message will remain as a deleted entry so replies and conversation history stay coherent."
@@ -2315,7 +2319,7 @@ export function DiscourseWorkspace({
             void tombstoneMessage(message);
           }}
         />
-      ) : null}
+      ) : null}</Presence>
     </main>
   );
 }

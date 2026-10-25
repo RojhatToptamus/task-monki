@@ -179,7 +179,7 @@ export function DiscourseMessage({
           </button>
         ) : null}
         {job?.freshnessAtCompletion === 'CHANGED_DURING_JOB' ? (
-          <p className="tm-discourse-message__stale-note">
+          <p className="tm-notice tm-discourse-message__stale-note" data-tone="waiting">
             Context changed while this response was running. It is preserved for history, not accepted as current evidence.
           </p>
         ) : null}

@@ -48,6 +48,22 @@ export interface PreparedPreviewSource {
   commitSha: string;
 }
 
+export interface PrepareExactTreePreviewSourceInput {
+  repositoryPath: string;
+  /** Git object environment that can read the tree (a private snapshot store and its alternates). */
+  gitEnvironment: NodeJS.ProcessEnv;
+  taskId: string;
+  generationId: string;
+  treeId: string;
+  signal?: AbortSignal;
+}
+
+export interface PreparedExactTreeSource {
+  generationRoot: string;
+  sourcePath: string;
+  treeId: string;
+}
+
 export class PreviewSourcePreparer {
   constructor(
     private readonly previewRoot: string,
@@ -125,6 +141,41 @@ export class PreviewSourcePreparer {
         taskId: input.taskId,
         generationId: input.generationId
       });
+      throw error;
+    }
+  }
+
+  /**
+   * Exports one exact tree, such as a snapshot of a dirty worktree, with the same refusals as an
+   * exact commit: submodules, unmaterialised LFS pointers, escaping links and `.git` segments.
+   */
+  async prepareExactTree(input: PrepareExactTreePreviewSourceInput): Promise<PreparedExactTreeSource> {
+    throwIfAborted(input.signal);
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.treeId)) {
+      throw new Error('Exact-tree Preview source requires a full tree id.');
+    }
+    const repositoryRoot = await fs.realpath(
+      path.resolve((await git(input.repositoryPath, ['rev-parse', '--show-toplevel'])).trim())
+    );
+    const treeId = (
+      await git(repositoryRoot, ['rev-parse', '--verify', `${input.treeId}^{tree}`], { env: input.gitEnvironment })
+    ).trim();
+    if (treeId !== input.treeId) throw new Error('The captured source tree is not available.');
+    const { generationRoot, sourcePath } = await this.createOwnedWorkspace(repositoryRoot, input.taskId, input.generationId);
+    try {
+      await fs.mkdir(sourcePath, { mode: 0o700 });
+      const treeEntries = await readExactCommitTree(repositoryRoot, treeId, this.limits, input.signal, input.gitEnvironment);
+      await exportExactCommitBlobs({
+        repositoryRoot,
+        sourcePath,
+        treeEntries,
+        limits: this.limits,
+        signal: input.signal,
+        env: input.gitEnvironment
+      });
+      return { generationRoot, sourcePath, treeId };
+    } catch (error) {
+      await this.cleanupOwnedGeneration({ taskId: input.taskId, generationId: input.generationId });
       throw error;
     }
   }
@@ -230,7 +281,8 @@ async function readExactCommitTree(
   repositoryRoot: string,
   commitSha: string,
   limits: PreviewSourceLimits,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  env?: NodeJS.ProcessEnv
 ): Promise<ExactCommitTreeEntry[]> {
   const entries: ExactCommitTreeEntry[] = [];
   let treeBytes = 0;
@@ -239,6 +291,7 @@ async function readExactCommitTree(
     repositoryRoot,
     argv: ['ls-tree', '-rz', '-l', '--full-tree', commitSha],
     signal,
+    env,
     maxRecordBytes: limits.maxPathBytes + 256,
     onRecord(record) {
       const separator = record.indexOf(0x09);
@@ -296,10 +349,12 @@ async function exportExactCommitBlobs(input: {
   treeEntries: ExactCommitTreeEntry[];
   limits: PreviewSourceLimits;
   signal?: AbortSignal;
+  env?: NodeJS.ProcessEnv;
 }): Promise<void> {
   const child = spawnPortable(getGitExecutablePath(), ['cat-file', '--batch'], {
     cwd: input.repositoryRoot,
-    stdio: ['pipe', 'pipe', 'pipe']
+    stdio: ['pipe', 'pipe', 'pipe'],
+    ...(input.env ? { env: { ...process.env, ...input.env } } : {})
   }) as ChildProcessWithoutNullStreams;
   const reader = new ChildByteReader(child);
   const stderr = collectBoundedStream(child.stderr, 64 * 1024);
@@ -391,13 +446,15 @@ async function readNullDelimitedGitOutput(input: {
   repositoryRoot: string;
   argv: string[];
   signal?: AbortSignal;
+  env?: NodeJS.ProcessEnv;
   maxRecordBytes: number;
   onRecord(record: Buffer): void;
 }): Promise<void> {
   throwIfAborted(input.signal);
   const child = spawnPortable(getGitExecutablePath(), input.argv, {
     cwd: input.repositoryRoot,
-    stdio: ['pipe', 'pipe', 'pipe']
+    stdio: ['pipe', 'pipe', 'pipe'],
+    ...(input.env ? { env: { ...process.env, ...input.env } } : {})
   }) as ChildProcessWithoutNullStreams;
   child.stdin.end();
   const stderr = collectBoundedStream(child.stderr, 64 * 1024);

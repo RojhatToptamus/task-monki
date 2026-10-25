@@ -156,9 +156,9 @@ export function RemoteWorkFields({
             </span>
           </button>;
         })}
-        {problem ? <div className="tm-error remote-work__problem" role="alert">
+        {problem ? <div className="tm-notice import-work__error" role="alert">
           <span>{problem}{signIn ? <> Run <code>{signIn}</code>.</> : null}</span>
-          {retryable ? <button type="button" className="ghost-button button--sm" disabled={locked} onClick={onRetry}>Retry</button> : null}
+          {retryable ? <div className="tm-notice__actions"><button type="button" disabled={locked} onClick={onRetry}>Retry</button></div> : null}
         </div>
           : loading && items.length === 0 ? <p className="import-work__empty" role="status">Loading {label.toLowerCase()}s…</p>
           : !loading && items.length === 0 ? <p className="import-work__empty">{query.trim() ? `No ${label.toLowerCase()} matches` : `No open ${label.toLowerCase()}s`}</p>

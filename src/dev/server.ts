@@ -14,6 +14,8 @@ import { createDevHttpServer, type DevHttpServer } from './devHttpServer';
 import { DevProcessLifecycle } from './devProcessLifecycle';
 import { deterministicDevSeedProviderDisabledReason } from './devSeedEnvironment';
 import { chooseRepositoryFolder } from './folderPicker';
+import { resolveBugReplayRunnerPaths } from '../core/bugReplay/BugReplayRunnerPaths';
+import { resolveDesignBrowserRuntimePaths } from '../core/design/AgentBrowserRuntimePath';
 
 const port = parseDevPort(
   process.env.TASK_MANAGER_API_PORT,
@@ -50,6 +52,15 @@ let service: TaskManagerService | undefined;
 const lifecycle = new DevProcessLifecycle();
 
 async function start(): Promise<void> {
+  const bugReplayRunnerPaths = deterministicSeedMode
+    ? undefined
+    : resolveBugReplayRunnerPaths({
+        isPackaged: false,
+        resourcesPath: '',
+        appPath: process.cwd(),
+        nodeExecutable: process.execPath,
+        browserExecutable: resolveDesignBrowserRuntimePaths({ isPackaged: false, resourcesPath: '', appPath: process.cwd() }).browserExecutablePath
+      });
   persistence = await ApplicationPersistence.open({
     profileRoot,
     appVersion: process.env.npm_package_version ?? 'development'
@@ -74,6 +85,12 @@ async function start(): Promise<void> {
       discourseStore: persistence.discourse,
       discourseWorkspaceRoot,
       reviewSnapshotRoot: path.join(profileRoot, 'review-snapshots'),
+      // Clean runs work here; recording needs the desktop app's native view.
+      bugReplay: {
+        store: persistence.bugReplay,
+        runnerPaths: () => bugReplayRunnerPaths,
+        scratchRoot: path.join(profileRoot, 'bug-replay', 'runs')
+      },
       designSkillRoot: path.join(process.cwd(), 'resources', 'design-skills'),
       ...(deterministicSeedMode
         ? {

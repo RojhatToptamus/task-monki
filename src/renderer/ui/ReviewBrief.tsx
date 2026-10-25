@@ -9,6 +9,8 @@ import { useClampOverflow } from './useClampOverflow';
 export interface ReviewBriefContent {
   /** The task as asked. */
   asked?: string;
+  /** What Task Monki observed of the task's recorded bug, before and after the change. */
+  behaviour?: { word: string; lines: string[] };
   /** What the implementation agent reported: a claim, quoted. */
   report?: { author: string; text: string };
   /** The reviewer's summary, quoted; the author names the runtime and model, one fact each. */
@@ -36,7 +38,7 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
   onFoldedChange(folded: boolean): void;
 }) {
   const bodyId = useId();
-  const { asked, report, reviewer, round } = content;
+  const { asked, behaviour, report, reviewer, round } = content;
   return (
     <section className="tm-review-brief" aria-label="Brief" data-folded={folded ? '' : undefined}>
       <button
@@ -55,6 +57,13 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
           {asked ? (
             <BriefBlock label="Request">
               <ClampedText lines={2} className="tm-review-brief__text">{asked}</ClampedText>
+            </BriefBlock>
+          ) : null}
+          {behaviour ? (
+            <BriefBlock label="Bug" meta={[behaviour.word]}>
+              <ul className="tm-review-brief__behaviour">
+                {behaviour.lines.map((line) => <li key={line}>{line}</li>)}
+              </ul>
             </BriefBlock>
           ) : null}
           {report ? (

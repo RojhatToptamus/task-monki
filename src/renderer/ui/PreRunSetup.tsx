@@ -14,6 +14,7 @@ import { matchingExecutionPolicyPreset, presetNetworkAccess, settingsForExecutio
 import { AgentModelSelector } from './AgentModelSelector';
 import { AccessMenu } from './AccessMenu';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
+import { PendingLabel } from './StableLabel';
 import { StoredAttachmentChip } from './AttachmentChip';
 import { useTaskAttachments, type UseTaskAttachmentsOptions } from './useTaskAttachments';
 
@@ -46,7 +47,7 @@ export function PreRunSetup({
   runtimes: AgentRuntimeState[];
   disabled?: boolean;
   /** Starting receives the request just saved. */
-  action?: { label: string; disabled?: boolean; title?: string; onClick(request: string): void };
+  action?: { label: string; pendingLabel?: string; pending?: boolean; disabled?: boolean; title?: string; onClick(request: string): void };
   /** A task opened from an issue starts from the issue: a request of the person's own is optional. */
   promptOptional?: boolean;
   onSettingsChange(settings: AgentExecutionSettings): void;
@@ -146,8 +147,12 @@ export function PreRunSetup({
           /> : null}
         </>}
         toolbarAction={action
-          ? <button type="submit" className="primary-button button--sm" disabled={!canSubmit} title={action.title}>{action.label}</button>
-          : <button type="submit" className="outline-button button--sm" disabled={!canSubmit}>{saving ? 'Saving…' : 'Save'}</button>}
+          ? <button type="submit" className="primary-button button--sm" disabled={!canSubmit} title={action.title} data-pending={action.pending || undefined}>
+            {action.pendingLabel ? <PendingLabel label={action.label} pendingLabel={action.pendingLabel} pending={Boolean(action.pending)} /> : action.label}
+          </button>
+          : <button type="submit" className="outline-button button--sm" disabled={!canSubmit} data-pending={saving || undefined}>
+            <PendingLabel label="Save" pendingLabel="Saving…" pending={saving} />
+          </button>}
       >
         <label className="tm-visually-hidden" htmlFor="initial-task-prompt">Task prompt</label>
         <textarea className="tm-composer__input" id="initial-task-prompt" rows={8} value={text} readOnly={saving} maxLength={65_536}

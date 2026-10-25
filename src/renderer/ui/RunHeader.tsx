@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ActionButtonTitle } from './ActionButtonTitle';
+import { formatClock } from '../model/timeAgo';
 import type { Tone } from '../model/viewTypes';
 import { StatusGlyph, statusGlyphFor } from './StatusBadge';
 
@@ -38,9 +39,9 @@ export function RunHeader({
       {running && elapsed !== undefined ? (
         <span
           className="tm-runheader__elapsed"
-          aria-label={`Elapsed ${formatElapsed(elapsed)}`}
+          aria-label={`Elapsed ${formatClock(elapsed)}`}
         >
-          {formatElapsed(elapsed)}
+          {formatClock(elapsed)}
         </span>
       ) : null}
       {running && onStop ? (
@@ -80,14 +81,4 @@ function useElapsed(startedAt: string | undefined, active: boolean): number | un
     return undefined;
   }
   return Math.max(0, now - startMs);
-}
-
-function formatElapsed(elapsedMs: number): string {
-  const totalSeconds = Math.floor(elapsedMs / 1000);
-  const seconds = totalSeconds % 60;
-  const minutes = Math.floor(totalSeconds / 60) % 60;
-  const hours = Math.floor(totalSeconds / 3600);
-  const mm = hours > 0 ? String(minutes).padStart(2, '0') : String(minutes);
-  const ss = String(seconds).padStart(2, '0');
-  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
 }

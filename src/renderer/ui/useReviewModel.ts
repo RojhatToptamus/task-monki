@@ -1241,7 +1241,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   }, [props.revealDiscussionId, readingOrdered, discussions, mode, guideView.status]);
 
   // The brief is the whole change's; a commit leads with its own message instead.
-  const brief: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer || props.brief.round) && !props.historical && !history
+  const brief: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.behaviour || props.brief.report || props.brief.reviewer || props.brief.round) && !props.historical && !history
     ? { ...props.brief, ...(props.brief.round ? { round: { ...props.brief.round, onShowItem: actions.showRequestItem } } : {}) }
     : undefined;
   const unavailable = loading ? 'Loading changes…'

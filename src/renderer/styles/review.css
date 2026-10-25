@@ -10,9 +10,8 @@
 
 /* The toolbar: the mode, in one place in both, then the review's state, and in
    the Diff what is compared and the view; then the review action. */
-.tm-review__bar { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; height: var(--h-bar); padding: 0 16px 0 8px; border-bottom: 1px solid var(--hair); }
+.tm-review__bar { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; height: var(--h-bar); padding: 0 16px 0 8px; box-shadow: inset 0 -1px 0 var(--hair); }
 .tm-review__modes { flex: 0 0 auto; }
-:is(.tm-review__modes, .tm-review__rail-switch) .segmented__btn { height: var(--h-compact); font-size: var(--t-help); }
 .tm-review__rail-switch { flex: 0 0 auto; margin: 8px 8px 0; }
 .tm-review__rail-count { margin-left: 5px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .tm-review__headline { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); white-space: nowrap; }
@@ -27,7 +26,8 @@
 .tm-review__scope-label { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-review__steps { display: inline-flex; flex: 0 0 auto; gap: 2px; }
 .tm-review__view__trigger.tm-action-menu__trigger { width: var(--h-icon); padding: 0; }
-.tm-review__notice { margin: 0; padding: 8px 16px; background: var(--waiting-bg); color: var(--waiting-ink); font-size: var(--t-help); }
+/* A band under the bar (.tm-notice--band), its words on the tab's 16px inset. */
+.tm-review__notice { padding-inline: 16px; }
 
 .tm-review__work { display: grid; flex: 1; grid-template-columns: var(--review-index-width) minmax(0, 1fr); min-height: 0; }
 .tm-review[data-review-mode='guide'] .tm-review__work { grid-template-columns: minmax(0, 1fr); }
@@ -88,7 +88,7 @@
    and a travel lands what it moves to under that line; a part that pins something
    above its heads raises it. Its size is what the Guide reads its layout from. */
 .tm-review__scroller { --review-sticky-top: 0px; container: review-scroller / size; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; outline: none; }
-.tm-review__diff { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 24px; }
+.tm-review__diff { display: flex; flex-direction: column; gap: 10px; padding: 12px calc(16px - var(--scrollbar)) 24px 16px; }
 .tm-review__empty { margin: 0; padding: 12px 0; color: var(--muted); font-size: var(--t-body); }
 
 /* The brief: what was asked, what the agent reported, then the review. Folded, the request's first line. */
@@ -174,9 +174,8 @@
 .tm-review-gap__step--down { grid-column: 2; }
 .tm-review-gap__all { display: flex; flex: 1; align-items: center; gap: 12px; min-width: 0; height: 100%; padding: 0 12px 0 8px; border: 0; background: transparent; color: var(--muted); font: inherit; text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 .tm-review-gap__all:hover { background-color: var(--hover); color: var(--text-soft); }
-.tm-review-gap__all:active { background-color: var(--press); }
 /* Inside the file's clip, the keyboard halo is drawn inward so it is never cut. */
-.app-shell[data-input-modality='keyboard'] :is(.tm-review-gap__all, .tm-review-gap__step):focus { box-shadow: var(--focus-halo-inset); }
+:root[data-input-modality='keyboard'] :is(.tm-review-gap__all, .tm-review-gap__step):focus { box-shadow: var(--focus-halo-inset); }
 
 /* Review rows: the line number (the old side's on a removed line) is the comment
    control, with the "+" inside it on hover; then the marker and code that wraps.
@@ -189,7 +188,7 @@
 /* The lines a comment is being written about read the same on every kind of line. */
 .tm-diffline--annotated.tm-diffline--selected .tm-diffline__num { background-color: var(--sel); color: var(--accent-ink); }
 .tm-review-line-group { position: relative; }
-.tm-review-line__comment { position: absolute; top: 2px; left: 4px; display: grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: var(--r-2xs); background-color: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised); color: var(--accent-ink); opacity: 0; transition: opacity var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+.tm-review-line__comment { position: absolute; top: 2px; left: 4px; display: grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: var(--r-2xs); background-color: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised); color: var(--accent-ink); opacity: 0; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 /* The "+" shows on the row under the pointer, and fills when the pointer is on the number itself.
    A chosen range is tinted, not repeated. */
 .tm-review-line-group > .tm-diffline:hover .tm-review-line__comment,
@@ -235,7 +234,6 @@
 .tm-review-thread__earlier { margin: 0; color: var(--muted); font-size: var(--t-help); }
 .tm-review-thread--earlier { background: var(--panel); }
 .tm-review-thread__dismiss { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--hair); }
-.tm-review-thread__dismiss .segmented__btn { height: var(--h-compact); font-size: var(--t-help); }
 .tm-review-thread__dismiss input { flex: 1 1 160px; min-width: 0; height: var(--h-toolbar); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font-size: var(--t-help); }
 .tm-review-thread__error { margin: 4px 0 0; }
 
@@ -344,12 +342,12 @@
 .tm-review__request-reason { align-self: center; max-width: 280px; color: var(--muted); font-size: var(--t-help); }
 
 /* The request sheet rises over the diff from the summary that opens it, without blocking it. */
-.tm-review-sheet { position: absolute; bottom: calc(100% + 8px); right: 16px; z-index: var(--layer-menu); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(600px, calc(100% - var(--review-index-width) - 32px)); max-height: min(520px, 54vh); border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); transform-origin: bottom right; animation: tm-review-sheet-in var(--motion-standard) var(--ease-out); }
-@keyframes tm-review-sheet-in { from { opacity: 0; transform: scale(0.96); } }
-.tm-review-sheet__head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 4px 14px; }
+.tm-review-sheet { position: absolute; bottom: calc(100% + 8px); right: 16px; z-index: var(--layer-menu); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(600px, calc(100% - var(--review-index-width) - 32px)); max-height: min(520px, 54vh); border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); transform-origin: bottom right; animation: tm-menu-in var(--motion-standard) var(--ease-out); }
+.tm-review-sheet[data-state='closed'] { animation: tm-shrink-out var(--motion-fast) var(--ease-out) forwards; }
+.tm-review-sheet__head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 4px 12px; }
 .tm-review-sheet__head h2 { flex: 1; margin: 0; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); }
 .tm-review-sheet__head .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
-.tm-review-sheet__body { display: grid; align-content: start; gap: 12px; min-height: 0; padding: 4px 14px 12px; overflow-y: auto; }
+.tm-review-sheet__body { display: grid; align-content: start; gap: 12px; min-height: 0; padding: 4px 12px 12px; overflow-y: auto; }
 .tm-review-sheet__group { display: grid; gap: 1px; }
 .tm-review-sheet__group h3 { margin: 0 0 2px; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
 .tm-review-sheet__item { display: grid; grid-template-columns: 16px 44px minmax(0, 1fr) auto auto; align-items: center; column-gap: 8px; min-height: 28px; margin: 0 -6px; padding: 0 0 0 6px; border-radius: var(--r-xs); }
@@ -366,10 +364,10 @@
 .tm-review-sheet__item--out .tm-review-sheet__title { color: var(--text-soft); }
 .tm-review-sheet__loc { color: var(--faint); font-family: var(--font-mono); font-size: var(--t-meta); white-space: nowrap; }
 .tm-review-sheet__state { color: var(--muted); font-size: var(--t-help); white-space: nowrap; }
-.tm-review-sheet__instruction > summary { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-review-sheet__instruction > summary { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
 .tm-review-sheet__instruction > summary:hover { color: var(--text-soft); }
 .tm-review-sheet__instruction pre { max-height: 220px; margin: 6px 0 0; padding: 10px 12px; overflow: auto; border-radius: var(--r-sm); background: var(--well); color: var(--text-soft); font: var(--t-meta)/1.55 var(--font-mono); white-space: pre-wrap; }
-.tm-review-sheet__foot { display: flex; align-items: center; gap: 8px; padding: 8px 10px 10px 14px; border-top: 1px solid var(--hair); }
+.tm-review-sheet__foot { display: flex; align-items: center; gap: 8px; padding: 8px 10px 10px 12px; box-shadow: inset 0 1px 0 var(--hair); }
 .tm-review-sheet__spacer { flex: 1; }
 
 /* The page's own width decides: 1036 at the minimum window, less once a docked side panel takes its room. */

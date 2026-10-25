@@ -2,6 +2,7 @@ import { useId, useMemo } from 'react';
 import { pluralize } from '../model/formatting';
 import { stageProgress } from '../model/reviewWalkthrough';
 import { DiffStat } from './DiffStat';
+import { PendingLabel } from './StableLabel';
 import { GeneralBands } from './ReviewBands';
 import { GuideFileUnit, GuideStageSection, type GuideScope } from './ReviewGuideStage';
 import { GuideAttentionList, GuideByline, GuideInlines } from './ReviewGuideParts';
@@ -108,7 +109,9 @@ function GuideBeforeWalkthrough({ scope }: { scope: GuideScope }) {
               {reviewing?.activity ? <p className="tm-review-guide__activity" title={reviewing.activity}>{reviewing.activity}</p> : null}
               {reviewing?.onStop ? (
                 <div className="tm-review-guide__step">
-                  <button type="button" className="ghost-button button--sm" disabled={reviewing.stopping} onClick={reviewing.onStop}>Stop review</button>
+                  <button type="button" className="ghost-button button--sm" disabled={reviewing.stopping} data-pending={reviewing.stopping || undefined} onClick={reviewing.onStop}>
+                    <PendingLabel label="Stop review" pendingLabel="Stopping…" pending={Boolean(reviewing.stopping)} />
+                  </button>
                 </div>
               ) : null}
             </>
@@ -124,8 +127,9 @@ function GuideBeforeWalkthrough({ scope }: { scope: GuideScope }) {
               {run ? (
                 <div className="tm-review-guide__step">
                   <button type="button" className="primary-button button--sm" disabled={Boolean(run.disabledReason) || run.busy}
+                    data-pending={run.starting || undefined}
                     aria-describedby={run.disabledReason && !run.starting ? reasonId : undefined} onClick={run.onRun}>
-                    {run.starting ? 'Starting…' : run.label}
+                    <PendingLabel label={run.label} pendingLabel="Starting…" pending={Boolean(run.starting)} />
                   </button>
                   {run.disabledReason && !run.starting ? <span id={reasonId} className="tm-review-guide__reason">{run.disabledReason}</span> : null}
                 </div>

@@ -5,7 +5,9 @@ import {
   clipboard,
   dialog,
   ipcMain,
+  nativeTheme,
   powerMonitor,
+  screen,
   session,
   shell,
   WebContentsView,
@@ -179,6 +181,9 @@ import type {
   DesignCanvasRuntime
 } from './DesignCanvasHost';
 import { DesignCanvasHost } from './DesignCanvasHost';
+import { BugRecordingViewHost } from './BugRecordingViewHost';
+import { resolveBugReplayRunnerPaths } from '../core/bugReplay/BugReplayRunnerPaths';
+import type { HideBugRecordingViewRequest, ShowBugRecordingViewRequest } from '../shared/bugReplay';
 import type {
   ApproveDesignCanvasExternalRequest,
   HideDesignCanvasRequest,
@@ -190,6 +195,7 @@ let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
 let persistence: ApplicationPersistence | undefined;
 let designCanvasHost: DesignCanvasHost | undefined;
+let bugRecordingViewHost: BugRecordingViewHost | undefined;
 let softwareUpdateController: SoftwareUpdateController | undefined;
 let serviceCreated = false;
 let ipcHandlersInstalled = false;
@@ -284,6 +290,7 @@ function createWindow(): void {
 
   hardenRendererWindow(window, trustPolicy);
   designCanvasHost?.attachWindow(window as never);
+  bugRecordingViewHost?.attachWindow(window as never);
   window.once('closed', () => {
     if (mainWindow === window) {
       mainWindow = undefined;
@@ -631,6 +638,43 @@ function installIpcHandlers(): void {
     async (_, input: ApproveDesignCanvasExternalRequest) =>
       requireDesignCanvasHost().approveExternal(input)
   );
+
+  handleTrustedIpc('bug:get', (_, input: Parameters<TaskManagerService['getBugReplay']>[0]) => service.getBugReplay(input));
+  handleTrustedIpc('bug:recording:start', (_, input: Parameters<TaskManagerService['startBugRecording']>[0]) => service.startBugRecording(input));
+  handleTrustedIpc('bug:recording:envFiles', (_, input: Parameters<TaskManagerService['chooseBugEnvFiles']>[0]) => service.chooseBugEnvFiles(input));
+  handleTrustedIpc('bug:runs:allow', (_, input: Parameters<TaskManagerService['allowBugReplayRuns']>[0]) => service.allowBugReplayRuns(input));
+  handleTrustedIpc('bug:approvals:list', () => service.listBugReplayApprovals());
+  handleTrustedIpc('bug:approvals:revoke', (_, input: Parameters<TaskManagerService['revokeBugReplayApproval']>[0]) => service.revokeBugReplayApproval(input));
+  handleTrustedIpc('bug:recording:cancel', (_, input: Parameters<TaskManagerService['cancelBugRecording']>[0]) => service.cancelBugRecording(input));
+  handleTrustedIpc('bug:recording:mark', (_, input: Parameters<TaskManagerService['markBug']>[0]) => service.markBug(input));
+  handleTrustedIpc('bug:recording:pick', (_, input: Parameters<TaskManagerService['pickBugCheck']>[0]) => service.pickBugCheck(input));
+  handleTrustedIpc('bug:recording:stopPick', (_, input: Parameters<TaskManagerService['stopBugPick']>[0]) => service.stopBugPick(input));
+  handleTrustedIpc('bug:recording:return', (_, input: Parameters<TaskManagerService['returnToBugRecording']>[0]) => service.returnToBugRecording(input));
+  handleTrustedIpc('bug:capture:preview', (_, input: Parameters<TaskManagerService['previewBugCapture']>[0]) => service.previewBugCapture(input));
+  handleTrustedIpc('bug:capture:save', (_, input: Parameters<TaskManagerService['saveBugCapture']>[0]) => service.saveBugCapture(input));
+  handleTrustedIpc('bug:send', (_, input: Parameters<TaskManagerService['sendBugToAgent']>[0]) => service.sendBugToAgent(input));
+  handleTrustedIpc('bug:baseline:run', (_, input: Parameters<TaskManagerService['runBugBaseline']>[0]) => service.runBugBaseline(input));
+  handleTrustedIpc('bug:verify', (_, input: Parameters<TaskManagerService['verifyBugFix']>[0]) => service.verifyBugFix(input));
+  handleTrustedIpc('bug:run:cancel', (_, input: Parameters<TaskManagerService['cancelBugReplayRun']>[0]) => service.cancelBugReplayRun(input));
+  handleTrustedIpc('bug:action', (_, input: Parameters<TaskManagerService['applyBugCaseAction']>[0]) => service.applyBugCaseAction(input));
+  handleTrustedIpc('bug:expectations:preview', (_, input: Parameters<TaskManagerService['previewBugExpectations']>[0]) => service.previewBugExpectations(input));
+  handleTrustedIpc('bug:expectations:save', (_, input: Parameters<TaskManagerService['saveBugExpectations']>[0]) => service.saveBugExpectations(input));
+  handleTrustedIpc('bug:remove', (_, input: Parameters<TaskManagerService['removeBug']>[0]) => service.removeBug(input));
+  handleTrustedIpc('bug:evidence:delete', (_, input: Parameters<TaskManagerService['deleteBugEvidence']>[0]) => service.deleteBugEvidence(input));
+  handleTrustedIpc('bug:image:read', (_, input: Parameters<TaskManagerService['readBugReplayImage']>[0]) => service.readBugReplayImage(input));
+  handleTrustedIpc('bug:currency', (_, input: Parameters<TaskManagerService['checkBugVerdictCurrency']>[0]) => service.checkBugVerdictCurrency(input));
+  handleTrustedIpc('bug:view:show', async (_, input: ShowBugRecordingViewRequest) => {
+    if (shutdownPromise) return;
+    requireBugRecordingViewHost().show(input);
+  });
+  handleTrustedIpc('bug:view:hide', async (_, input: HideBugRecordingViewRequest) => {
+    if (shutdownPromise) return;
+    bugRecordingViewHost?.hide(input);
+  });
+  handleTrustedIpc('bug:view:reload', async (_, input: { taskId: string; sessionId: string }) =>
+    service.reloadBugRecording(input.taskId, input.sessionId)
+  );
+  handleTrustedIpc('bug:view:open', async (_, input: unknown) => service.openBugRecordingPage(input));
 
   handleTrustedIpc(
     'discourse:conversations:list',
@@ -1050,6 +1094,11 @@ function requireDesignCanvasHost(): DesignCanvasHost {
   return designCanvasHost;
 }
 
+function requireBugRecordingViewHost(): BugRecordingViewHost {
+  if (!bugRecordingViewHost) throw new Error('Recording needs the desktop app on macOS.');
+  return bugRecordingViewHost;
+}
+
 function createDesignCanvasRuntime(): DesignCanvasRuntime {
   return {
     sessionForPartition: (partition) => session.fromPartition(partition) as never,
@@ -1115,6 +1164,10 @@ function beginApplicationShutdown(): Promise<void> {
     .then(() => designCanvasHost?.shutdown())
     .catch((error: unknown) => {
       console.error('Failed to shut down the Design canvas cleanly.', error);
+    })
+    .then(() => bugRecordingViewHost?.shutdown())
+    .catch((error: unknown) => {
+      console.error('Failed to close the bug recording view cleanly.', error);
     })
     .then(() => persistence?.close())
     .catch((error: unknown) => {
@@ -1192,6 +1245,27 @@ void app.whenReady().then(async () => {
         appPath: app.getAppPath()
       })
     : undefined;
+  if (process.platform === 'darwin') {
+    bugRecordingViewHost = new BugRecordingViewHost({
+      sessionForPartition: (partition) => session.fromPartition(partition) as never,
+      createView: ({ webPreferences }) => {
+        const { session: targetSession, ...preferences } = webPreferences;
+        return new WebContentsView({ webPreferences: { ...preferences, session: targetSession as never } }) as never;
+      },
+      chromiumVersion: process.versions.chrome,
+      userAgent: app.userAgentFallback,
+      prefersDark: () => nativeTheme.shouldUseDarkColors,
+      scaleFactor: () => (mainWindow && !mainWindow.isDestroyed() ? screen.getDisplayMatching(mainWindow.getBounds()) : screen.getPrimaryDisplay()).scaleFactor
+    });
+  }
+  // Checked once: the replay toolchain is fixed for the life of the process.
+  const bugReplayRunnerPaths = resolveBugReplayRunnerPaths({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    appPath: app.getAppPath(),
+    nodeExecutable: process.execPath,
+    browserExecutable: designBrowserPaths?.browserExecutablePath
+  });
   persistence = await ApplicationPersistence.open({
     profileRoot: userDataDir,
     appVersion: app.getVersion(),
@@ -1230,6 +1304,12 @@ void app.whenReady().then(async () => {
         appPath: app.getAppPath()
       }),
       clientToolCredentialRoot: path.join(userDataDir, 'client-tool-credentials'),
+      bugReplay: {
+        store: persistence.bugReplay,
+        runnerPaths: () => bugReplayRunnerPaths,
+        recordingHost: () => (bugReplayRunnerPaths ? bugRecordingViewHost : undefined),
+        scratchRoot: path.join(userDataDir, 'bug-replay', 'runs')
+      },
       ...(designCanvasHost
         ? {
             designRepositoryRoot: persistence.paths.designRepositoryRoot,

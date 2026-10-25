@@ -62,6 +62,18 @@ The same runtime packages Chrome for Testing 152.0.7977.54. Desktop packages
 include `CHROME_FOR_TESTING_NOTICES` beside the browser. Chromium component
 notices are also available from `chrome://credits` while the browser runs.
 
+## Playwright
+
+Bug Replay drives the bundled Chrome for Testing with `playwright-core`
+1.63.0 from Microsoft. It is licensed under Apache License 2.0. Desktop
+packages include its `LICENSE`, `NOTICE` and `ThirdPartyNotices.txt` in the
+unpacked `node_modules/playwright-core` directory beside the application
+archive.
+
+Playwright
+
+Copyright (c) Microsoft Corporation
+
 ## Main runtime dependencies
 
 Task Monki's direct open-source runtime dependencies include React and React

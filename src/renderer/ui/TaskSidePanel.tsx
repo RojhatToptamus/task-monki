@@ -1,7 +1,8 @@
-import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { focusedPanelWidth, persistFocusedPanelWidth } from '../model/workspaceLayout';
 import { changeWithMotion, type ExpandMotion } from './expandMotion';
 import { PanelResizeHandle } from './PanelResizeHandle';
+import { useLayerProps } from './presence';
 
 const PANEL_DEFAULT_WIDTH = 380;
 const PANEL_MIN_WIDTH = 320;
@@ -137,11 +138,20 @@ export function DockedSidePanel({ width, maxWidth, onWidthChange, label, childre
   );
 }
 
-/** The same panel over the page when the window is too narrow to dock it; expanded, it covers the page. */
+/**
+ * The same panel over the page when the window is too narrow to dock it; expanded, it covers the
+ * page. Rendered under a `Presence`, it slides back out when closed (DESIGN.md §12).
+ */
 export function FloatingSidePanel({ children }: { children: ReactNode }) {
   const { expanded } = useSideSheetState();
+  const layer = useLayerProps();
+  const layerRef = layer.ref;
+  const ref = useCallback((element: HTMLDivElement | null) => {
+    attachSheet(element);
+    layerRef(element);
+  }, [layerRef]);
   return (
-    <div ref={attachSheet} className="tm-side-sheet tm-side-sheet--floating" data-expanded={expanded ? '' : undefined}>
+    <div {...layer} ref={ref} className="tm-side-sheet tm-side-sheet--floating" data-expanded={expanded ? '' : undefined}>
       {children}
     </div>
   );

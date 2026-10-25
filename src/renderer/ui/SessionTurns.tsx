@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { CircleAlert, MoreHorizontal, Play, RotateCcw } from 'lucide-react';
+import { Bug, CircleAlert, MoreHorizontal, Play, RotateCcw } from 'lucide-react';
 import { CopyIconButton } from './CopyIconButton';
 import type {
   AgentItemRecord, AgentPlanRevisionRecord, InteractionRequestRecord, RunRecord, TaskAttachmentRecord, TaskInstruction
@@ -84,9 +84,16 @@ function groupByRun<T extends { runId?: string }>(records: T[]): Map<string, T[]
 
 type ReadAttachment = (id: string) => Promise<AttachmentContent>;
 
+/** The recorded bug a turn carried to the agent, shown with its message as an attachment is. */
+export interface TurnBug {
+  title: string;
+  onOpen(): void;
+}
+
 /** One run as the person sees it: the opener, the agent's messages and steps, then the outcome. */
-export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtifact, onShowDebug, attachments = [], onReadAttachment }: {
+export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtifact, onShowDebug, attachments = [], onReadAttachment, bug }: {
   turn: SessionTurn;
+  bug?: TurnBug;
   clip?: number;
   failure?: RunFailureBannerViewModel;
   /** Who recorded the run's own reason, so it is quoted under that name. */
@@ -103,7 +110,7 @@ export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtif
     {turn.opener && !clip ? turn.opener.kind === 'prompt'
       ? turn.opener.reviewRequest
         ? <ReviewRequestCard request={turn.opener.reviewRequest} time={turn.opener.at} />
-        : <UserMessage text={turn.opener.text} time={turn.opener.at} attachments={attachments} onReadAttachment={onReadAttachment} />
+        : <UserMessage text={turn.opener.text} time={turn.opener.at} attachments={attachments} onReadAttachment={onReadAttachment} bug={bug} />
       : <Message from="user" className="tm-message--action">
         <span className="tm-message__action">{turn.opener.label === 'Retried'
           ? <RotateCcw size={13} aria-hidden="true" />
@@ -122,9 +129,9 @@ export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtif
       if (entry.kind === 'steps') return <ActivitySteps key={entry.key} steps={entry.steps} live={live && index === entries.length - 1} />;
       return <PlanCard key={entry.key} steps={entry.plan.steps} marker={planMarker(turn.run, entry.plan)} live={live} />;
     })}
-    {failure ? <div className="tm-turn__notice" data-status={failure.status}>
+    {failure ? <div className="tm-notice tm-turn__notice" data-tone={failure.status === 'LOST' || failure.status === 'RECOVERY_REQUIRED' ? 'waiting' : undefined}>
       <CircleAlert size={16} aria-hidden="true" />
-      <div><strong>{failure.title}</strong>{failure.detail ? <p>{failure.detail}</p> : null}
+      <div><strong className="tm-notice__title">{failure.title}</strong>{failure.detail ? <p>{failure.detail}</p> : null}
         {failure.reportedReason ? <ReportedQuote className="tm-turn__reported" source={sourceName ?? 'Agent'}>{failure.reportedReason}</ReportedQuote> : null}</div>
     </div> : null}
     {capture ? <div className="tm-turn__changes">{capture}</div> : null}
@@ -132,13 +139,20 @@ export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtif
   </div>;
 }
 
-export function UserMessage({ text, time, status, attachments, onReadAttachment }: {
-  text: string; time: string; status?: string; attachments?: TaskAttachmentRecord[]; onReadAttachment?: ReadAttachment;
+export function UserMessage({ text, time, status, attachments, onReadAttachment, bug }: {
+  text: string; time: string; status?: string; attachments?: TaskAttachmentRecord[]; onReadAttachment?: ReadAttachment; bug?: TurnBug;
 }) {
   return <Message from="user" label="Your message">
     <MessageContent user><p>{text}</p></MessageContent>
-    {attachments?.length ? <ul className="task-attachments" aria-label="Message attachments">
-      {attachments.map((file) => <StoredAttachmentChip key={file.id} attachment={file} onRead={onReadAttachment ? () => onReadAttachment(file.id) : undefined} />)}
+    {attachments?.length || bug ? <ul className="task-attachments" aria-label="Message attachments">
+      {bug ? <li className="task-attachment">
+        <span className="task-attachment__preview" aria-hidden="true"><Bug size={16} /></span>
+        <span className="task-attachment__body">
+          <button type="button" className="task-attachment__name task-attachment__open" onClick={bug.onOpen}>{bug.title}</button>
+          <span className="task-attachment__meta">Recorded bug</span>
+        </span>
+      </li> : null}
+      {attachments?.map((file) => <StoredAttachmentChip key={file.id} attachment={file} onRead={onReadAttachment ? () => onReadAttachment(file.id) : undefined} />)}
     </ul> : null}
     <MessageMeta className={status ? 'tm-message__meta--status' : undefined}>
       <MessageTime value={time} />{status ? <span role="status">{status}</span> : null}

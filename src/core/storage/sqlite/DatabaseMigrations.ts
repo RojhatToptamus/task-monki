@@ -1559,6 +1559,116 @@ CREATE INDEX preview_generations_key_routing_idx ON preview_generations(preview_
     // and Ask subjects of a walkthrough's stage, a file or a discussion. The
     // version prevents older clients from opening them.
     sql: 'SELECT 1;'
+  },
+  {
+    version: 15,
+    name: 'bug-replay-records',
+    // Bug Replay captures, versioned cases, expectation decisions, replay runs and their
+    // evidence files. Task payloads also carry the bug's gate projection and BUG_ events, so
+    // the version keeps older clients from opening them. Rows reference their task without a
+    // cascade: task deletion removes them through the store so their bytes are collected too.
+    // Every statement tolerates tables that already exist: a development build numbered these
+    // migrations 14 and 15, so a profile it upgraded holds them and skips straight to 16.
+    sql: `
+CREATE TABLE IF NOT EXISTS bug_captures (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS bug_captures_task_idx ON bug_captures(task_id, created_at DESC, id);
+
+CREATE TABLE IF NOT EXISTS bug_cases (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  capture_id TEXT NOT NULL REFERENCES bug_captures(id),
+  status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'REPLACED', 'REMOVED')),
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  record_revision INTEGER NOT NULL DEFAULT 0 CHECK (record_revision >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS bug_cases_task_idx ON bug_cases(task_id, created_at DESC, id);
+CREATE UNIQUE INDEX IF NOT EXISTS bug_cases_one_active_idx ON bug_cases(task_id) WHERE status = 'ACTIVE';
+
+CREATE TABLE IF NOT EXISTS bug_case_versions (
+  id TEXT PRIMARY KEY,
+  case_id TEXT NOT NULL REFERENCES bug_cases(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  version INTEGER NOT NULL CHECK (version >= 1),
+  digest TEXT NOT NULL CHECK (length(digest) = 64),
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  created_at TEXT NOT NULL,
+  UNIQUE (case_id, version)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS bug_case_decisions (
+  id TEXT PRIMARY KEY,
+  case_id TEXT NOT NULL REFERENCES bug_cases(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  kind TEXT NOT NULL CHECK (kind IN ('PROPOSED', 'APPROVED', 'SUPERSEDED', 'WITHDRAWN', 'REPLACED', 'REMOVED')),
+  version_id TEXT REFERENCES bug_case_versions(id),
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS bug_case_decisions_case_idx ON bug_case_decisions(case_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS bug_replay_runs (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  case_id TEXT REFERENCES bug_cases(id),
+  version_id TEXT REFERENCES bug_case_versions(id),
+  set_id TEXT,
+  kind TEXT NOT NULL CHECK (kind IN ('RECORD', 'BASELINE', 'CANDIDATE')),
+  state TEXT NOT NULL,
+  name TEXT NOT NULL UNIQUE,
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  record_revision INTEGER NOT NULL DEFAULT 0 CHECK (record_revision >= 0),
+  queued_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS bug_replay_runs_task_idx ON bug_replay_runs(task_id, queued_at DESC, id);
+CREATE INDEX IF NOT EXISTS bug_replay_runs_state_idx ON bug_replay_runs(state, queued_at, id);
+CREATE INDEX IF NOT EXISTS bug_replay_runs_set_idx ON bug_replay_runs(set_id, queued_at, id) WHERE set_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS bug_replay_runs_case_idx ON bug_replay_runs(case_id, queued_at DESC, id) WHERE case_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS bug_replay_files (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('CAPTURE', 'RUN')),
+  owner_id TEXT NOT NULL,
+  managed_file_id TEXT NOT NULL UNIQUE REFERENCES managed_files(id) ON DELETE RESTRICT,
+  kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS bug_replay_files_owner_idx ON bug_replay_files(owner_kind, owner_id, id);
+CREATE INDEX IF NOT EXISTS bug_replay_files_task_idx ON bug_replay_files(task_id, id);
+`
+  },
+  {
+    version: 16,
+    name: 'bug-replay-kept-approvals',
+    // Replay approvals the person kept for a repository, one row per recipe they read and
+    // approved. They go with their repository; revoking one deletes its row. Like the tables
+    // before it, it may already exist where a later schema was rewound.
+    sql: `
+CREATE TABLE IF NOT EXISTS bug_replay_approvals (
+  id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  approval_digest TEXT NOT NULL CHECK (length(approval_digest) = 64),
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  created_at TEXT NOT NULL,
+  UNIQUE (repository_id, approval_digest)
+) STRICT;
+
+-- The child columns deleting a task's bug looks up. They are here rather than beside their
+-- tables so a profile a development build numbered 15 gets them too.
+CREATE INDEX IF NOT EXISTS bug_case_versions_task_idx ON bug_case_versions(task_id);
+CREATE INDEX IF NOT EXISTS bug_case_decisions_task_idx ON bug_case_decisions(task_id);
+CREATE INDEX IF NOT EXISTS bug_case_decisions_version_idx ON bug_case_decisions(version_id) WHERE version_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS bug_replay_runs_version_idx ON bug_replay_runs(version_id) WHERE version_id IS NOT NULL;
+`
   }
 ] as const;
 

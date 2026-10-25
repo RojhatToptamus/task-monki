@@ -93,6 +93,12 @@ states:
   repository-specific view containing a task from the secondary checkout
 - preview: missing recipe, approval required, preparing, ready, failed, stale,
   stopped, recovery required, and cleanup incomplete
+- recorded bugs (`bug` set): reproduced, fix verified with a removed earlier
+  bug in Debug, still failing, couldn't verify after an env file changed, out of
+  date, and an interrupted recording kept as evidence. The verified verdict is
+  about the worktree's real tree, so the app shows it as current. The seed has
+  no replay browser: these states render and their actions that only read work,
+  but nothing runs.
 
 Each task title starts with `[seed:<slug>]`, so the UI can be searched by slug.
 

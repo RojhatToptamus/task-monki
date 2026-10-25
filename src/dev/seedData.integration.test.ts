@@ -9,6 +9,7 @@ import {
 } from '../core/agent/codex/codexCapabilities';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { inspectImportPreview } from '../core/git/ImportPreview';
+import { bugReplayRef, ReviewSnapshotStore } from '../core/git/ReviewSnapshotStore';
 import { posixModeMatches } from '../core/filesystem/secureFilesystem';
 import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import type { Task, TaskSnapshot } from '../shared/contracts';
@@ -131,6 +132,39 @@ describe('Task Monki development seed data', () => {
       expect(selectBoardTasks(snapshot.tasks, secondaryBoard).map((task) => task.id)).toEqual([
         taskForScenario(manifest, snapshot, 'board-backlog').id
       ]);
+    } finally {
+      await persistence.close();
+    }
+  });
+
+  it('seeds each recorded-bug state the Overview, the board and the Inbox show', async () => {
+    const states = Object.fromEntries(
+      ['bug-reproduced', 'bug-fix-verified', 'bug-still-failing', 'bug-couldnt-verify', 'bug-stale', 'bug-evidence-only']
+        .map((slug) => [slug, taskForScenario(manifest, snapshot, slug).projection.bugReplay?.state])
+    );
+    expect(states).toEqual({
+      'bug-reproduced': 'REPRODUCED',
+      'bug-fix-verified': 'FIX_VERIFIED',
+      'bug-still-failing': 'STILL_FAILING',
+      'bug-couldnt-verify': 'COULDNT_VERIFY',
+      'bug-stale': 'STALE',
+      'bug-evidence-only': 'CAPTURED'
+    });
+    expect(taskForScenario(manifest, snapshot, 'bug-couldnt-verify').projection.bugReplay?.fact).toBe("Couldn't verify: .env changed since the bug was recorded");
+
+    // The verdict is about the worktree as the app recaptures it, so it is shown as current.
+    const verified = taskForScenario(manifest, snapshot, 'bug-fix-verified');
+    const worktree = snapshot.worktrees.find((candidate) => candidate.taskId === verified.id)!;
+    const snapshots = new ReviewSnapshotStore(path.join(manifest.profileRoot, 'review-snapshots'));
+    const current = await snapshots.captureTree(worktree.worktreePath, bugReplayRef(verified.id, 'seed-test'));
+    expect(verified.projection.bugReplay?.verdictTreeId).toBe(current.treeId);
+
+    const persistence = await openSeedPersistence(manifest.profileRoot);
+    try {
+      const cases = await persistence.bugReplay.read((reader) => persistence.bugReplay.listCases(reader, verified.id));
+      const removed = cases.find((bugCase) => bugCase.status === 'REMOVED')!;
+      expect(removed.title).toBe('Checkout hangs with an empty cart');
+      expect(await persistence.bugReplay.read((reader) => persistence.bugReplay.bytesForCase(reader, removed.id, removed.captureId))).toBeGreaterThan(0);
     } finally {
       await persistence.close();
     }

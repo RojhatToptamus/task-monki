@@ -8,6 +8,7 @@ declare global {
     previewSecrets?: import('../shared/applicationPreview').PreviewSecretsApi;
     taskManagerShell?: TaskManagerShellApi;
     designCanvas?: DesignCanvasApi;
+    bugRecordingView?: import('../shared/bugReplay').BugRecordingViewApi;
   }
 }
 

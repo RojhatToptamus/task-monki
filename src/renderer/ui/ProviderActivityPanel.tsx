@@ -479,7 +479,7 @@ function ItemBody({
     const summaries = stringArray(payload.summary);
     return (
       <>
-        <p className="provider-label-warning">
+        <p className="tm-notice" data-tone="waiting">
           Provider reasoning summary — not hidden chain-of-thought.
         </p>
         {summaries.length > 0 ? (

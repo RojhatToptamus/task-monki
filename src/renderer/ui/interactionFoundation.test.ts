@@ -31,16 +31,17 @@ describe('renderer style policies', () => {
   it('honors operating-system accessibility preferences', async () => {
     const css = await readRendererStyles();
 
+    // Focus is keyed on the document, so dialogs portaled outside the app shell get it too.
     expect(css).toMatch(
-      /\.app-shell\s+:where\([\s\S]*textarea[\s\S]*\):focus[\s\S]*var\(--field-edge-focus\)/
+      /:root\s+:where\([\s\S]*textarea[\s\S]*\):focus[\s\S]*var\(--field-edge-focus\)/
     );
     expect(css).toMatch(
-      /\.app-shell\[data-input-modality='keyboard'\][\s\S]*:focus[\s\S]*var\(--focus-ring\)/
+      /:root\[data-input-modality='keyboard'\][\s\S]*:focus[\s\S]*var\(--focus-ring\)/
     );
     expect(css).not.toContain('var(--field-focus-line)');
     expect(css).not.toContain('var(--field-focus-ring)');
     expect(css).toMatch(
-      /\.app-shell\[data-input-modality='pointer'\][\s\S]*:focus \{\s*outline: none/
+      /:root\[data-input-modality='pointer'\][\s\S]*:focus \{\s*outline: none/
     );
     expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*outline: 1px solid Highlight/);
     expect(css).toMatch(/@media \(prefers-contrast: more\)[\s\S]*--edge/);
@@ -49,6 +50,11 @@ describe('renderer style policies', () => {
     );
     expect(css).toMatch(
       /@media \(prefers-reduced-motion: reduce\)[\s\S]*\*,\s*\*::before,\s*\*::after[\s\S]*animation-iteration-count: 1 !important/
+    );
+    // Waiting before showing pending is not motion: reduced motion keeps the delay, so a quick
+    // action never flashes its pending label.
+    expect(css).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.tm-pending-label\[data-pending\] > \* \{\s*transition-delay: var\(--pending-delay\) !important/
     );
   });
 

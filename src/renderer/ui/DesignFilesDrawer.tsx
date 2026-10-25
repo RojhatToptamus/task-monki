@@ -14,6 +14,7 @@ import { PaperclipIcon } from './AttachmentComposerShell';
 import { DisclosureChevron } from './DisclosureChevron';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { UiCloseIcon, UiFileIcon } from './UiIcons';
+import { PendingLabel } from './StableLabel';
 import { Tooltip } from './Tooltip';
 import { useTaskAttachments } from './useTaskAttachments';
 
@@ -139,10 +140,7 @@ export function DesignFilesDrawer({
       onDrop={attachments.drop}
     >
       <header className="tm-design-files__head">
-        <div>
-          <h2 id="design-files-title">Files and references</h2>
-          <p>Select references to include in your next message.</p>
-        </div>
+        <h2 id="design-files-title">Files and references</h2>
         <Tooltip label="Close files and references"><button type="button" className="tm-iconbtn" aria-label="Close files and references" onClick={onClose}>
           <UiCloseIcon />
         </button></Tooltip>
@@ -195,7 +193,7 @@ export function DesignFilesDrawer({
             </ul>
           ) : null}
           {attachments.overflowError || attachments.modelError ? (
-            <p className="tm-design-files__error" role="alert">
+            <p className="form-error tm-design-files__error" role="alert">
               {attachments.overflowError ?? attachments.modelError}
             </p>
           ) : null}
@@ -209,9 +207,10 @@ export function DesignFilesDrawer({
                 attachments.hasErrors ||
                 Boolean(attachments.modelError)
               }
+              data-pending={submitting || undefined}
               onClick={() => void addReferences()}
             >
-              {submitting ? 'Adding…' : 'Add references'}
+              <PendingLabel label="Add references" pendingLabel="Adding…" pending={submitting} />
             </button>
           ) : null}
         </section>
@@ -320,7 +319,7 @@ export function DesignFilesDrawer({
             <p className="tm-design-files__note">Only the first 500 files are shown.</p>
           ) : null}
         </details>
-        {error ? <p className="tm-design-files__error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-notice tm-design-files__error" role="alert">{error}</p> : null}
       </div>
     </aside>
   );

@@ -41,7 +41,7 @@ export function RawProviderMessage({
       <summary>
         <DisclosureChevron /><span>Raw provider event #{reference.sequence}</span>
       </summary>
-      {error ? <p className="form-error">{error}</p> : null}
+      {error ? <p className="tm-notice">{error}</p> : null}
       <pre>{loading ? 'Loading…' : raw ?? 'Open to load the journal entry.'}</pre>
     </details>
   );

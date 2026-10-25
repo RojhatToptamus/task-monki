@@ -529,8 +529,13 @@ export function designWorkspaceLayout(
   };
 }
 
-export function designWorkspaceIsCompact(width: number): boolean {
-  return Number.isFinite(width) && !designWorkspaceLayout(width, false).splitAvailable;
+/**
+ * Whether the Designs list is a drawer at this width: the open list would leave the work too
+ * narrow for a split. It depends on the width alone, so the drawer stays one while it is closed
+ * and slides in and out like the Discourse list.
+ */
+export function designWorkspaceIsCompact(width: number, historyWidth = 268): boolean {
+  return Number.isFinite(width) && !designWorkspaceLayout(width, false, historyWidth).splitAvailable;
 }
 
 export function formatDesignUpdatedAt(value: string, now = new Date()): string {

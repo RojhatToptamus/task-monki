@@ -1,6 +1,7 @@
 import type { Ref } from 'react';
 import type { DiscourseConversationSummary } from '../../shared/discourse';
 import { PanelIcon } from './AppNavigation';
+import { Presence } from './presence';
 import { UiPlusIcon, UiSearchIcon } from './UiIcons';
 import { Tooltip } from './Tooltip';
 
@@ -40,14 +41,14 @@ export function DiscourseConversationRail({
 }: DiscourseConversationRailProps) {
   return (
     <>
-      {modalOpen ? (
+      <Presence>{modalOpen ? (
         <button
           type="button"
           className="tm-discourse-drawer-scrim tm-discourse-drawer-scrim--rail"
           aria-label="Dismiss conversation list"
           onClick={onClose}
         />
-      ) : null}
+      ) : null}</Presence>
       <aside
         id="discourse-history-panel"
         ref={railRef}

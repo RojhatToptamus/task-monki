@@ -14,6 +14,7 @@ import type {
 import { availableProviderCommandOptions } from '../model/agentPermissions';
 import { displayApprovalCommand, isWithinWorktree } from '../model/approvalCommand';
 import { StructuredData } from './display';
+import { PendingLabel } from './StableLabel';
 import { StatusGlyph } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
 import { UserInputSummary } from './UserInputSummary';
@@ -136,7 +137,7 @@ function InteractionBody({
       {interaction.type === 'COMMAND_APPROVAL' || (interaction.type === 'USER_INPUT' && hasAction(interaction, 'ANSWER'))
         ? null
         : interaction.policyWarnings.map((warning) => (
-            <p className="interaction-card__warning" key={warning}>
+            <p className="tm-notice interaction-card__warning" data-tone="waiting" key={warning}>
               {warning}
             </p>
           ))}
@@ -195,7 +196,7 @@ function InteractionBody({
       ) : null}
       {error ? (
         <div className="interaction-card__error">
-          <p className="form-error" role="alert">The response could not be sent. Try again.</p>
+          <p className="tm-notice" role="alert">The response could not be sent. Try again.</p>
           <details className="tm-raw">
             <summary className="tm-disclosure__label"><DisclosureChevron />Error details</summary>
             <pre>{error}</pre>
@@ -278,7 +279,7 @@ function CommandRequest({
         </pre>
       ) : null}
       {interaction.policyWarnings.map((warning) => (
-        <p className="interaction-card__warning" key={warning}>
+        <p className="tm-notice interaction-card__warning" data-tone="waiting" key={warning}>
           {warning}
         </p>
       ))}
@@ -740,7 +741,8 @@ function UserInputRequest({
             />
           ) : null}
           <ActionButton
-            label={submitting ? 'Sending…' : 'Submit answers'}
+            label="Submit answers"
+            pendingLabel="Sending…"
             busy={submitting}
             disabled={disabled || !canSubmit}
             onClick={() =>
@@ -1079,12 +1081,15 @@ function RejectButtons({
 
 function ActionButton({
   label,
+  pendingLabel,
   variant = 'primary',
   disabled,
   busy = false,
   onClick
 }: {
   label: string;
+  /** The label while the response is sent; it shows after the pending delay (DESIGN.md 6.1). */
+  pendingLabel?: string;
   variant?: 'primary' | 'secondary';
   disabled: boolean;
   busy?: boolean;
@@ -1097,9 +1102,10 @@ function ActionButton({
       disabled={disabled && !busy}
       aria-disabled={disabled || undefined}
       aria-busy={busy || undefined}
+      data-pending={busy || undefined}
       onClick={() => { if (!disabled) void onClick(); }}
     >
-      {label}
+      {pendingLabel ? <PendingLabel label={label} pendingLabel={pendingLabel} pending={busy} /> : label}
     </button>
   );
 }

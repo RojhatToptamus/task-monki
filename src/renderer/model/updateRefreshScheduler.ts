@@ -35,6 +35,8 @@ export function taskDataRefreshPlan(
     event.type === 'runtime.updated' ||
     event.type === 'preview.recipe-generation.updated' ||
     event.type === 'preview.log.updated' ||
+    // The Bug section reads its own snapshot; a change to the bug's state also sends task.updated.
+    event.type === 'bugReplay.updated' ||
     event.type.startsWith('discourse.')
   ) {
     return { board: false, detail: 'NONE' };
